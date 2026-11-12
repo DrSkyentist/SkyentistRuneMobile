@@ -357,7 +357,13 @@ static BOOL RMGUFileMatches(NSString *path, NSDictionary *want, NSString **why) 
 }
 
 - (BOOL)enabled {
+#if SKYRUNE_FORCE_BUNDLED_JARS
+    // Diagnostic build: use only game jars packaged inside this IPA.
+    // This disables update checks and selecting previously downloaded jars.
+    return NO;
+#else
     return RMGUMatches([RMGameUpdate shellCommit], @"[0-9a-f]{40}");
+#endif
 }
 
 - (NSURL *)manifestURL {
@@ -471,9 +477,13 @@ static BOOL RMGUFileMatches(NSString *path, NSDictionary *want, NSString **why) 
 - (RMGameUpdateSet *)bootSelect:(NSMutableArray<NSString *> *)lines {
     self.booted = YES;
     if (!self.enabled) {
+#if SKYRUNE_FORCE_BUNDLED_JARS
+        [lines addObject:@"[game-update] SkyRune login test: forced bundled jars; remote game updates disabled"];
+#else
         [lines addObject:[NSString stringWithFormat:@"[game-update] off: this build's commit is %@, so it boots the "
                                                     @"bundled jars",
                                                     [RMGameUpdate shellCommit]]];
+#endif
         return nil;
     }
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -564,7 +574,11 @@ static BOOL RMGUFileMatches(NSString *path, NSDictionary *want, NSString **why) 
     });
     NSString *commit = [RMGameUpdate shellCommit];
     return [NSString stringWithFormat:@"%@ | build %@ | booted %@ | installed %@ | last check: %@",
+#if SKYRUNE_FORCE_BUNDLED_JARS
+                                      @"off (SkyRune login test: bundled jars)",
+#else
                                       self.enabled ? @"on" : @"off (dev build)",
+#endif
                                       commit.length > 12 ? [commit substringToIndex:12] : commit,
                                       self.booted ? (self.bootedSetId ?: @"bundled jars") : @"not yet",
                                       current.length ? current : @"none", self.lastCheck ?: @"?"];
