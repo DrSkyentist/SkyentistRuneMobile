@@ -197,7 +197,7 @@ public final class ConfigProfileBridge
 							log.info("[skyrune-profile-trace] APPLY done ms={}",
 								(System.nanoTime() - applyStart) / 1_000_000);
 						}
-						catch (Throwable ex)
+						catch (RuntimeException | Error ex)
 						{
 							log.error("[skyrune-profile-trace] APPLY failed", ex);
 							throw ex;
