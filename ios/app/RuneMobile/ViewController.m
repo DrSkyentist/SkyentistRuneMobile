@@ -7193,11 +7193,19 @@ static const CGFloat kHeatNoticeNarrow = 280; // the narrow card, its text wrapp
     // (long-press the ⚙ button to change), so it is read once and a turn keeps this launch's size. Default + clamp
     // to the safe 480..600 band proven not to overlap.
     static int launchRenderH;
+    static int launchIpadSharpnessPct;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        launchRenderH = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"interfaceRenderH"];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        launchRenderH = (int)[defaults integerForKey:@"interfaceRenderH"];
         if (launchRenderH < 480 || launchRenderH > 600)
             launchRenderH = 540;
+        // iPad-only raster resolution multiplier. Defaults to the existing 0.10.1 behavior;
+        // never exceed the native screen pixel count on the short axis.
+        launchIpadSharpnessPct = (int)[defaults integerForKey:@"ipadSharpnessPct"];
+        if (launchIpadSharpnessPct != 125 && launchIpadSharpnessPct != 150 &&
+            launchIpadSharpnessPct != 200)
+            launchIpadSharpnessPct = 100;
     });
     int renderH = launchRenderH;
     // TAB-1: on a large screen (an iPad) the canvas grows with the screen's height in points instead, so the HUD stays
@@ -7208,6 +7216,9 @@ static const CGFloat kHeatNoticeNarrow = 280; // the narrow card, its text wrapp
     if (shortPt >= kLargeScreenPt) {
         int screenPx = (int)lround(shortPt * self.traitCollection.displayScale);
         renderShort = MAX(renderShort, MIN(screenPx, (int)lround(shortPt * renderShort / kPhoneShortPt)));
+        // Keep native aspect ratio, but sample the game at more pixels for crisper
+        // text/world details. The tradeoff is a smaller game UI and higher CPU/GPU load.
+        renderShort = MIN(screenPx, (int)lround(renderShort * launchIpadSharpnessPct / 100.0));
     }
     // Never narrower than the game's narrowest layout: a 4:3 screen at a phone's 540 would be 720 wide. In portrait
     // the width is the short side itself, so every phone gets the 765-wide canvas there.
@@ -10316,9 +10327,13 @@ static CGRect mapRectFromArr(NSArray *a) {
     if (self.presentedViewController) return;
     int cur = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"interfaceRenderH"];
     if (cur < 480 || cur > 600) cur = 540;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Interface size"
-        message:@"Bigger UI shows the HUD (chat, minimap, inventory) larger but less of the world. Applies on next launch."
-        preferredStyle:UIAlertControllerStyleActionSheet];
+    BOOL ipad = MIN(self.view.bounds.size.width, self.view.bounds.size.height) >= kLargeScreenPt;
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:ipad ? @"iPad display" : @"Interface size"
+                         message:ipad
+                             ? @"Interface size changes the HUD size. Sharpness renders more pixels, but makes the game UI smaller and uses more power. Changes apply next launch."
+                             : @"Bigger UI shows the HUD (chat, minimap, inventory) larger but less of the world. Applies on next launch."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
     // label -> renderH (smaller canvas = larger UI)
     NSArray *opts = @[@[@"Small", @600], @[@"Default", @540], @[@"Large", @480]];
     for (NSArray *o in opts) {
@@ -10330,6 +10345,25 @@ static CGRect mapRectFromArr(NSArray *a) {
             [[NSUserDefaults standardUserDefaults] setInteger:h forKey:@"interfaceRenderH"];
             [self appendLine:[NSString stringWithFormat:@"[shell] interface size -> %@ (renderH %d), applies next launch", o[0], h]];
         }]];
+    }
+    if (ipad) {
+        int sharpness = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"ipadSharpnessPct"];
+        if (sharpness != 125 && sharpness != 150 && sharpness != 200) sharpness = 100;
+        NSArray *sharpOpts = @[
+            @[@"Original sharpness (100%)", @100],
+            @[@"Sharper (125%)", @125],
+            @[@"High detail (150%)", @150],
+            @[@"Native pixels (up to 200%)", @200],
+        ];
+        for (NSArray *o in sharpOpts) {
+            int pct = [o[1] intValue];
+            NSString *title = [NSString stringWithFormat:@"%@%@", pct == sharpness ? @"✓ " : @"", o[0]];
+            [ac addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                                                 handler:^(UIAlertAction *a) {
+                [[NSUserDefaults standardUserDefaults] setInteger:pct forKey:@"ipadSharpnessPct"];
+                [self appendLine:[NSString stringWithFormat:@"[shell] iPad sharpness -> %d%%, applies next launch", pct]];
+            }]];
+        }
     }
     [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     ac.popoverPresentationController.sourceView = self.pluginButton;
