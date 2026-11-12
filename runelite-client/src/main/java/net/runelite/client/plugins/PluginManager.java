@@ -114,21 +114,32 @@ public class PluginManager
 	@Subscribe
 	public void onProfileChanged(ProfileChanged profileChanged)
 	{
+		log.info("[skyrune-profile-trace] PROFILE_CHANGED received on thread={}", Thread.currentThread().getName());
 		refreshPlugins();
+		log.info("[skyrune-profile-trace] PROFILE_CHANGED refresh queued");
 	}
 
 	private void refreshPlugins()
 	{
+		log.info("[skyrune-profile-trace] DEFAULT_CONFIG begin");
 		loadDefaultPluginConfiguration(null);
+		log.info("[skyrune-profile-trace] DEFAULT_CONFIG done; scheduling plugin reconciliation");
 		SwingUtilities.invokeLater(() ->
 		{
+			log.info("[skyrune-profile-trace] RECONCILE begin plugins={}", getPlugins().size());
+			int changes = 0;
 			for (Plugin plugin : getPlugins())
 			{
+				final String name = plugin.getClass().getSimpleName();
 				try
 				{
-					if (isPluginEnabled(plugin) != activePlugins.contains(plugin))
+					final boolean enabled = isPluginEnabled(plugin);
+					final boolean active = activePlugins.contains(plugin);
+					if (enabled != active)
 					{
-						if (activePlugins.contains(plugin))
+						log.info("[skyrune-profile-trace] CHANGE {} {} -> {}", name, active ? "running" : "stopped", enabled ? "running" : "stopped");
+						changes++;
+						if (active)
 						{
 							stopPlugin(plugin);
 						}
@@ -140,9 +151,10 @@ public class PluginManager
 				}
 				catch (PluginInstantiationException e)
 				{
-					log.error("Error during starting/stopping plugin {}", plugin.getClass().getSimpleName(), e);
+					log.error("[skyrune-profile-trace] ERROR reconciling {}", name, e);
 				}
 			}
+			log.info("[skyrune-profile-trace] RECONCILE done changes={}", changes);
 		});
 	}
 
@@ -450,6 +462,11 @@ public class PluginManager
 
 		activePlugins.add(plugin);
 
+		// INFO-level breadcrumbs survive Release builds and expose the plugin where a
+		// synchronous startUp() (or its event registrations) stops making progress.
+		final String traceName = plugin.getClass().getSimpleName();
+		final long traceStarted = System.nanoTime();
+		log.info("[skyrune-profile-trace] START begin {}", traceName);
 		try
 		{
 			plugin.startUp();
@@ -467,6 +484,7 @@ public class PluginManager
 			eventBus.register(plugin);
 			scheduler.register(plugin);
 			eventBus.post(new PluginChanged(plugin, true));
+			log.info("[skyrune-profile-trace] START done {} ms={}", traceName, (System.nanoTime() - traceStarted) / 1_000_000);
 		}
 		catch (ThreadDeath e)
 		{
@@ -474,6 +492,7 @@ public class PluginManager
 		}
 		catch (Throwable ex)
 		{
+			log.error("[skyrune-profile-trace] START failed {} ms={}", traceName, (System.nanoTime() - traceStarted) / 1_000_000, ex);
 			// stop the plugin and fire the change event to update the plugin list panel
 			try
 			{
@@ -499,6 +518,9 @@ public class PluginManager
 			return false;
 		}
 
+		final String traceName = plugin.getClass().getSimpleName();
+		final long traceStarted = System.nanoTime();
+		log.info("[skyrune-profile-trace] STOP begin {}", traceName);
 		scheduler.unregister(plugin);
 		eventBus.unregister(plugin);
 
@@ -508,9 +530,11 @@ public class PluginManager
 
 			log.debug("Plugin {} is now stopped", plugin.getClass().getSimpleName());
 			eventBus.post(new PluginChanged(plugin, false));
+			log.info("[skyrune-profile-trace] STOP done {} ms={}", traceName, (System.nanoTime() - traceStarted) / 1_000_000);
 		}
 		catch (Exception ex)
 		{
+			log.error("[skyrune-profile-trace] STOP failed {} ms={}", traceName, (System.nanoTime() - traceStarted) / 1_000_000, ex);
 			throw new PluginInstantiationException(ex);
 		}
 
