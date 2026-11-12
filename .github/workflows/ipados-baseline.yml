@@ -1,8 +1,8 @@
-name: iPadOS baseline IPA
+name: SkyRune iPadOS 0.10.1 bundled login test
 
 on:
   push:
-    branches: [build/ipados-baseline]
+    branches: [experiment/ipados-login-bundled-0101]
   workflow_dispatch:
 
 permissions:
@@ -59,7 +59,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyentistRuneMobile-iPadOS-IPA
+          name: SkyRune-0101-Bundled-Login-Test-IPA
           path: dist/ci/*.ipa
           if-no-files-found: error
           retention-days: 14
