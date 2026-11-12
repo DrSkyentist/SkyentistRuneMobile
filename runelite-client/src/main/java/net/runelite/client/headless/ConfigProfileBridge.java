@@ -176,24 +176,47 @@ public final class ConfigProfileBridge
 		// I/O-heavy prepare (incl. the optional blocking remote-sync fetch) stays on this executor, while the
 		// engine-touching swap + event fan-out is marshalled onto the client thread, where it is engine-safe.
 		final ClientThread ct = clientThread;
+		log.info("[skyrune-profile-trace] SWITCH requested; scheduling profile preparation");
 		executor().submit(() ->
 		{
+			final long start = System.nanoTime();
 			try
 			{
+				log.info("[skyrune-profile-trace] PREPARE begin");
 				cm.switchProfileMobile(target, apply ->
 				{
+					log.info("[skyrune-profile-trace] PREPARE done ms={}; scheduling APPLY on client thread",
+						(System.nanoTime() - start) / 1_000_000);
+					final Runnable tracedApply = () ->
+					{
+						final long applyStart = System.nanoTime();
+						log.info("[skyrune-profile-trace] APPLY begin thread={}", Thread.currentThread().getName());
+						try
+						{
+							apply.run();
+							log.info("[skyrune-profile-trace] APPLY done ms={}",
+								(System.nanoTime() - applyStart) / 1_000_000);
+						}
+						catch (Throwable ex)
+						{
+							log.error("[skyrune-profile-trace] APPLY failed", ex);
+							throw ex;
+						}
+					};
 					if (ct != null)
 					{
-						ct.invokeLater(apply);
+						ct.invokeLater(tracedApply);
 					}
 					else
 					{
-						apply.run(); // no client thread wired (shouldn't happen post-init); run inline
+						log.warn("[skyrune-profile-trace] client thread missing; applying inline");
+						tracedApply.run();
 					}
 				});
 			}
 			catch (Throwable ex)
 			{
+				log.error("[skyrune-profile-trace] PREPARE failed", ex);
 				BridgeFaults.note("ConfigProfileBridge.switchProfile", ex);
 			}
 		});
