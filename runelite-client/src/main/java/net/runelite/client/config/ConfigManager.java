@@ -246,6 +246,11 @@ public class ConfigManager
 
 		allKeys.addAll(oldData.keySet());
 
+		// Diagnostic-only profile-switch trace: report CONFIG dispatch boundaries without
+		// logging sensitive configuration values. A missing "done" points to the event
+		// subscriber that stalled; a completed dispatch makes the next key visible.
+		log.info("[skyrune-profile-trace] CONFIG_FANOUT begin candidateKeys={}", allKeys.size());
+		int configTraceIndex = 0;
 		for (String wholeKey : allKeys)
 		{
 			String[] split = splitKey(wholeKey);
@@ -273,10 +278,19 @@ public class ConfigManager
 			configChanged.setKey(key);
 			configChanged.setOldValue(oldValue);
 			configChanged.setNewValue(newValue);
+			++configTraceIndex;
+			// Log key identifiers only, never oldValue/newValue or account data.
+			log.info("[skyrune-profile-trace] CONFIG begin index={} group={} key={}",
+				configTraceIndex, groupName, key);
 			eventBus.post(configChanged);
+			log.info("[skyrune-profile-trace] CONFIG done index={} group={} key={}",
+				configTraceIndex, groupName, key);
 		}
 
+		log.info("[skyrune-profile-trace] CONFIG_FANOUT done dispatched={}", configTraceIndex);
+		log.info("[skyrune-profile-trace] PROFILE_EVENT begin");
 		eventBus.post(new ProfileChanged());
+		log.info("[skyrune-profile-trace] PROFILE_EVENT done");
 	}
 
 	public String getRSProfileKey()
