@@ -282,7 +282,7 @@ typedef NS_ENUM(NSInteger, RMCoverUpdate) {
 static const CFTimeInterval kCoverUpdatePlayWait = 4.0;       // longest a Play tap waits for the check
 static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate card's re-check interval
 
-@interface ViewController () <RMHeatScaleStore, UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate, SFSafariViewControllerDelegate, UNUserNotificationCenterDelegate, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate, UISearchBarDelegate, OverlayEditHudHost> {
+@interface ViewController () <RMHeatScaleStore, UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate, SFSafariViewControllerDelegate, UNUserNotificationCenterDelegate, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate, UISearchBarDelegate, UIPencilInteractionDelegate, OverlayEditHudHost> {
     // Game-canvas centres of each tab stone (updated each chrome refresh), used to proxy a tap onto the live
     // desktop stone. A C array, so it lives as an ivar rather than a property.
     CGPoint _tabCentres[14];
@@ -378,6 +378,12 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 @property (nonatomic, assign) BOOL sceneHoverActive;
 @property (nonatomic, assign) int sceneHoverLastX;
 @property (nonatomic, assign) int sceneHoverLastY;
+// SQUEEZE-1: preserve the last on-canvas Pencil pointer so a discrete squeeze can
+// anchor the contextual menu even if UIKit briefly ends hover on the squeeze.
+@property (nonatomic, assign) CGPoint sceneHoverLastPoint;
+@property (nonatomic, assign) CFTimeInterval sceneHoverLastAt;
+@property (nonatomic, strong) UIPencilInteraction *pencilInteraction;
+@property (nonatomic, assign) BOOL pencilSqueezeMenuPending;
 @property (nonatomic, strong) PluginPanelsViewController *panelDock; // persistent always-on panel dock
 @property (nonatomic, strong) CADisplayLink *displayLink;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTask;
@@ -1935,6 +1941,13 @@ static NSString *const kLayoutNoticeBody =
                 initWithTarget:self action:@selector(onSceneHover:)];
             self.sceneHover = hover;
             [self.screen addGestureRecognizer:hover];
+        }
+        // Apple Pencil Pro squeeze is reported through UIPencilInteraction.
+        // Add it to the SAME view as hover so its hoverPose is in screen coords.
+        if (@available(iOS 17.5, *)) {
+            UIPencilInteraction *pencil = [[UIPencilInteraction alloc] initWithDelegate:self];
+            [self.screen addInteraction:pencil];
+            self.pencilInteraction = pencil;
         }
     }
 
@@ -8726,8 +8739,47 @@ static CGRect mapRectFromArr(NSArray *a) {
         return;
     self.sceneHoverLastX = x;
     self.sceneHoverLastY = y;
+    self.sceneHoverLastPoint = [g locationInView:self.screen];
+    self.sceneHoverLastAt = CACurrentMediaTime();
     self.sceneHoverActive = YES;
     [JVMLauncher postMoveX:x y:y];
+}
+
+// SQUEEZE-1: one deliberate Apple Pencil Pro squeeze opens the EXISTING native
+// tap-select menu at the pen tip, not a synthetic world click. The right-click
+// is the same user-directed action as a long press; no menu option is selected
+// automatically. Never use the previous hover point once it's stale.
+- (void)pencilInteraction:(UIPencilInteraction *)interaction
+        didReceiveSqueeze:(UIPencilInteractionSqueeze *)squeeze API_AVAILABLE(ios(17.5)) {
+    if (squeeze.phase != UIPencilInteractionPhaseEnded)
+        return;
+    if (UIPencilInteraction.preferredSqueezeAction == UIPencilPreferredActionIgnore)
+        return;
+    if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
+        self.menuClosing || self.itemDragging || self.paneSwiping)
+        return;
+
+    CGPoint tip;
+    if (squeeze.hoverPose) {
+        tip = squeeze.hoverPose.location; // same coordinate space as self.screen
+    } else if (self.sceneHoverLastAt > 0 &&
+               CACurrentMediaTime() - self.sceneHoverLastAt < 0.75) {
+        tip = self.sceneHoverLastPoint;   // transient hover loss during squeeze
+    } else {
+        [self appendLine:@"[pencil] squeeze ignored (no live pen location)"];
+        return;
+    }
+
+    int gx = 0, gy = 0;
+    if (![self mapPoint:tip toGameX:&gx toGameY:&gy])
+        return;
+    [JVMLauncher postCancelArmedTap]; // no armed left-click may follow squeeze
+    [self openEngineMenuAtGameX:gx gameY:gy anchor:tip];
+    // Normal short right-click menus are drag-select-only. With no finger held,
+    // that menu would be inert. Force the existing tappable/persistent menu.
+    self.pencilSqueezeMenuPending = YES;
+    [self haptic:RMHapticMenuOpen];
+    [self appendLine:[NSString stringWithFormat:@"[pencil] squeeze -> menu @%d,%d", gx, gy]];
 }
 
 - (BOOL)mapPoint:(CGPoint)p toGameX:(int *)gx toGameY:(int *)gy {
@@ -9241,7 +9293,9 @@ static CGRect mapRectFromArr(NSArray *a) {
     CGFloat fullH  = kMenuHeaderViewH + entries.count * kMenuRowViewH;
     BOOL tooTall = fullH > availH;
 
-    if (hasSub || tooTall || self.shiftHeld) {
+    BOOL pencilMenu = self.pencilSqueezeMenuPending;
+    self.pencilSqueezeMenuPending = NO;
+    if (pencilMenu || hasSub || tooTall || self.shiftHeld) {
         self.menuTapMode = YES;
         [self buildTapMenuWithEntries:entries drilledParent:-1];
     } else {
@@ -9775,6 +9829,7 @@ static CGRect mapRectFromArr(NSArray *a) {
 }
 
 - (void)teardownMenuViews {
+    self.pencilSqueezeMenuPending = NO;
     [self.menuContainer removeFromSuperview];
     [self.menuDismissLayer removeFromSuperview];
     self.menuContainer = nil;
