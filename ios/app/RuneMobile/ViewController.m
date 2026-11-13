@@ -372,6 +372,12 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 // blits the newest frame-*.png to an on-screen image view — keeping the app in the foreground
 // "actively rendering" jetsam band AND showing the live login screen (the start of the real UI).
 @property (nonatomic, strong) UIImageView *screen;
+// iPadOS 16.1+: Apple Pencil hover (and trackpad pointer hover) passes through the existing
+// no-click JavaBridge.onMove / clearHover path. Finger taps and drags are unchanged.
+@property (nonatomic, strong) UIHoverGestureRecognizer *sceneHover;
+@property (nonatomic, assign) BOOL sceneHoverActive;
+@property (nonatomic, assign) int sceneHoverLastX;
+@property (nonatomic, assign) int sceneHoverLastY;
 @property (nonatomic, strong) PluginPanelsViewController *panelDock; // persistent always-on panel dock
 @property (nonatomic, strong) CADisplayLink *displayLink;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTask;
@@ -1918,6 +1924,19 @@ static NSString *const kLayoutNoticeBody =
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(onPinch:)];
     [self.screen addGestureRecognizer:pinch];
+
+    // HOVER-1: Apple Pencil hovering over the iPad game canvas should behave like a desktop
+    // mouse moving WITHOUT clicking. The native recognizer does not synthesize touches,
+    // keypresses, or menu actions, and is deliberately absent on iPhones. Attaching it to
+    // the game view excludes the native toolbar/panels from game hover hit-testing.
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+        if (@available(iOS 16.1, *)) {
+            UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
+                initWithTarget:self action:@selector(onSceneHover:)];
+            self.sceneHover = hover;
+            [self.screen addGestureRecognizer:hover];
+        }
+    }
 
     // In-game keyboard control, bottom-left of the game's safe area (by the chat box). A button subview
     // consumes its own taps, so it never leaks a walk-here click to the gestures beneath.
@@ -8672,6 +8691,45 @@ static CGRect mapRectFromArr(NSArray *a) {
 
 // Map a point (in the screen image view's coordinate space) to gamepack-canvas pixels, honouring the
 // ScaleAspectFit letterbox. Returns NO if the point is in the letterbox margin (outside the game frame).
+// HOVER-1: map Apple Pencil proximity to a *movement-only* AWT mouse event. This is the
+// same JNI bridge already used for the native right-click menu's highlight tracking.
+// No click, right-click, shift, action, or gameplay automation can originate here.
+// Mouse/trackpad hover shares UIKit's recognizer; both are useful pointer inputs.
+- (void)onSceneHover:(UIHoverGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateEnded ||
+        g.state == UIGestureRecognizerStateCancelled ||
+        g.state == UIGestureRecognizerStateFailed) {
+        if (self.sceneHoverActive) {
+            self.sceneHoverActive = NO;
+            [JVMLauncher postClearHover];
+        }
+        return;
+    }
+    if (g.state != UIGestureRecognizerStateBegan &&
+        g.state != UIGestureRecognizerStateChanged)
+        return;
+    // Never compete with a menu gesture, in-flight item drag, or a not-yet-ready engine.
+    if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
+        self.menuClosing || self.itemDragging)
+        return;
+    int x = 0, y = 0;
+    if (![self mapPoint:[g locationInView:self.screen] toGameX:&x toGameY:&y]) {
+        if (self.sceneHoverActive) {
+            self.sceneHoverActive = NO;
+            [JVMLauncher postClearHover];
+        }
+        return;
+    }
+    // UIKit can report the same point repeatedly while Pencil z-height changes.
+    // Avoid flooding the AWT queue with identical MOUSE_MOVED events.
+    if (self.sceneHoverActive && x == self.sceneHoverLastX && y == self.sceneHoverLastY)
+        return;
+    self.sceneHoverLastX = x;
+    self.sceneHoverLastY = y;
+    self.sceneHoverActive = YES;
+    [JVMLauncher postMoveX:x y:y];
+}
+
 - (BOOL)mapPoint:(CGPoint)p toGameX:(int *)gx toGameY:(int *)gy {
     UIImage *img = self.screen.image;
     CGFloat iw = img ? img.size.width : 0, ih = img ? img.size.height : 0;
