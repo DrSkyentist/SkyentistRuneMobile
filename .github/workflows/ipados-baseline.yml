@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   build-ipados:
-    runs-on: macos-15
+    # macos-15 uses constrained ARM64 hosts; Intel hosts can also cross-compile for iPadOS arm64.
+    runs-on: macos-15-intel
     timeout-minutes: 90
     env:
       IOS_ADHOC: "1"
