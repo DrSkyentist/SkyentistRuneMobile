@@ -117,8 +117,9 @@ targets:
           GCC_PREPROCESSOR_DEFINITIONS:
             - "$(inherited)"
             - "GLES_SILENCE_DEPRECATION=1"
+            - "SKYRUNE_FORCE_BUNDLED_JARS=1"
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.audaro.runemobile
+        PRODUCT_BUNDLE_IDENTIFIER: dev.skyentist.skyrune.loginlab
         # Default/Release plist: the hardened one (no file-sharing). Debug overrides to Info-Debug.plist above.
         INFOPLIST_FILE: RuneMobile/Info.plist
         CODE_SIGN_ENTITLEMENTS: RuneMobile/RuneMobile.entitlements

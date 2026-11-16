@@ -287,7 +287,7 @@ typedef NS_ENUM(NSInteger, RMCoverUpdate) {
 static const CFTimeInterval kCoverUpdatePlayWait = 4.0;       // longest a Play tap waits for the check
 static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate card's re-check interval
 
-@interface ViewController () <RMHeatScaleStore, UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate, SFSafariViewControllerDelegate, UNUserNotificationCenterDelegate, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate, UISearchBarDelegate, OverlayEditHudHost> {
+@interface ViewController () <RMHeatScaleStore, UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate, SFSafariViewControllerDelegate, UNUserNotificationCenterDelegate, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate, UISearchBarDelegate, UIPencilInteractionDelegate, OverlayEditHudHost> {
     // Game-canvas centres of each tab stone (updated each chrome refresh), used to proxy a tap onto the live
     // desktop stone. A C array, so it lives as an ivar rather than a property.
     CGPoint _tabCentres[14];
@@ -377,6 +377,18 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 // blits the newest frame-*.png to an on-screen image view — keeping the app in the foreground
 // "actively rendering" jetsam band AND showing the live login screen (the start of the real UI).
 @property (nonatomic, strong) UIImageView *screen;
+// iPadOS 16.1+: Apple Pencil hover (and trackpad pointer hover) passes through the existing
+// no-click JavaBridge.onMove / clearHover path. Finger taps and drags are unchanged.
+@property (nonatomic, strong) UIHoverGestureRecognizer *sceneHover;
+@property (nonatomic, assign) BOOL sceneHoverActive;
+@property (nonatomic, assign) int sceneHoverLastX;
+@property (nonatomic, assign) int sceneHoverLastY;
+// SQUEEZE-1: preserve the last on-canvas Pencil pointer so a discrete squeeze can
+// anchor the contextual menu even if UIKit briefly ends hover on the squeeze.
+@property (nonatomic, assign) CGPoint sceneHoverLastPoint;
+@property (nonatomic, assign) CFTimeInterval sceneHoverLastAt;
+@property (nonatomic, strong) UIPencilInteraction *pencilInteraction;
+@property (nonatomic, assign) BOOL pencilSqueezeMenuPending;
 @property (nonatomic, strong) PluginPanelsViewController *panelDock; // persistent always-on panel dock
 @property (nonatomic, strong) CADisplayLink *displayLink;
 @property (nonatomic, assign) UIBackgroundTaskIdentifier bgTask;
@@ -1923,6 +1935,26 @@ static NSString *const kLayoutNoticeBody =
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(onPinch:)];
     [self.screen addGestureRecognizer:pinch];
+
+    // HOVER-1: Apple Pencil hovering over the iPad game canvas should behave like a desktop
+    // mouse moving WITHOUT clicking. The native recognizer does not synthesize touches,
+    // keypresses, or menu actions, and is deliberately absent on iPhones. Attaching it to
+    // the game view excludes the native toolbar/panels from game hover hit-testing.
+    if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+        if (@available(iOS 16.1, *)) {
+            UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
+                initWithTarget:self action:@selector(onSceneHover:)];
+            self.sceneHover = hover;
+            [self.screen addGestureRecognizer:hover];
+        }
+        // Apple Pencil Pro squeeze is reported through UIPencilInteraction.
+        // Add it to the SAME view as hover so its hoverPose is in screen coords.
+        if (@available(iOS 17.5, *)) {
+            UIPencilInteraction *pencil = [[UIPencilInteraction alloc] initWithDelegate:self];
+            [self.screen addInteraction:pencil];
+            self.pencilInteraction = pencil;
+        }
+    }
 
     // In-game keyboard control, bottom-left of the game's safe area (by the chat box). A button subview
     // consumes its own taps, so it never leaks a walk-here click to the gestures beneath.
@@ -7220,11 +7252,19 @@ static const CGFloat kHeatNoticeNarrow = 280; // the narrow card, its text wrapp
     // (long-press the ⚙ button to change), so it is read once and a turn keeps this launch's size. Default + clamp
     // to the safe 480..600 band proven not to overlap.
     static int launchRenderH;
+    static int launchIpadSharpnessPct;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        launchRenderH = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"interfaceRenderH"];
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        launchRenderH = (int)[defaults integerForKey:@"interfaceRenderH"];
         if (launchRenderH < 480 || launchRenderH > 600)
             launchRenderH = 540;
+        // iPad-only raster resolution multiplier. Defaults to the existing 0.10.1 behavior;
+        // never exceed the native screen pixel count on the short axis.
+        launchIpadSharpnessPct = (int)[defaults integerForKey:@"ipadSharpnessPct"];
+        if (launchIpadSharpnessPct != 125 && launchIpadSharpnessPct != 150 &&
+            launchIpadSharpnessPct != 200)
+            launchIpadSharpnessPct = 100;
     });
     int renderH = launchRenderH;
     // TAB-1: on a large screen (an iPad) the canvas grows with the screen's height in points instead, so the HUD stays
@@ -7235,6 +7275,9 @@ static const CGFloat kHeatNoticeNarrow = 280; // the narrow card, its text wrapp
     if (shortPt >= kLargeScreenPt) {
         int screenPx = (int)lround(shortPt * self.traitCollection.displayScale);
         renderShort = MAX(renderShort, MIN(screenPx, (int)lround(shortPt * renderShort / kPhoneShortPt)));
+        // Keep native aspect ratio, but sample the game at more pixels for crisper
+        // text/world details. The tradeoff is a smaller game UI and higher CPU/GPU load.
+        renderShort = MIN(screenPx, (int)lround(renderShort * launchIpadSharpnessPct / 100.0));
     }
     // Never narrower than the game's narrowest layout: a 4:3 screen at a phone's 540 would be 720 wide. In portrait
     // the width is the short side itself, so every phone gets the 765-wide canvas there.
@@ -8688,6 +8731,85 @@ static CGRect mapRectFromArr(NSArray *a) {
 
 // Map a point (in the screen image view's coordinate space) to gamepack-canvas pixels, honouring the
 // ScaleAspectFit letterbox. Returns NO if the point is in the letterbox margin (outside the game frame).
+// HOVER-1: map Apple Pencil proximity to a *movement-only* AWT mouse event. This is the
+// same JNI bridge already used for the native right-click menu's highlight tracking.
+// No click, right-click, shift, action, or gameplay automation can originate here.
+// Mouse/trackpad hover shares UIKit's recognizer; both are useful pointer inputs.
+- (void)onSceneHover:(UIHoverGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateEnded ||
+        g.state == UIGestureRecognizerStateCancelled ||
+        g.state == UIGestureRecognizerStateFailed) {
+        if (self.sceneHoverActive) {
+            self.sceneHoverActive = NO;
+            [JVMLauncher postClearHover];
+        }
+        return;
+    }
+    if (g.state != UIGestureRecognizerStateBegan &&
+        g.state != UIGestureRecognizerStateChanged)
+        return;
+    // Never compete with a menu gesture, in-flight item drag, or a not-yet-ready engine.
+    if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
+        self.menuClosing || self.itemDragging)
+        return;
+    int x = 0, y = 0;
+    if (![self mapPoint:[g locationInView:self.screen] toGameX:&x toGameY:&y]) {
+        if (self.sceneHoverActive) {
+            self.sceneHoverActive = NO;
+            [JVMLauncher postClearHover];
+        }
+        return;
+    }
+    // UIKit can report the same point repeatedly while Pencil z-height changes.
+    // Avoid flooding the AWT queue with identical MOUSE_MOVED events.
+    if (self.sceneHoverActive && x == self.sceneHoverLastX && y == self.sceneHoverLastY)
+        return;
+    self.sceneHoverLastX = x;
+    self.sceneHoverLastY = y;
+    self.sceneHoverLastPoint = [g locationInView:self.screen];
+    self.sceneHoverLastAt = CACurrentMediaTime();
+    self.sceneHoverActive = YES;
+    [JVMLauncher postMoveX:x y:y];
+}
+
+// SQUEEZE-1: one deliberate Apple Pencil Pro squeeze opens the EXISTING native
+// tap-select menu at the pen tip, not a synthetic world click. The right-click
+// is the same user-directed action as a long press; no menu option is selected
+// automatically. Never use the previous hover point once it's stale.
+- (void)pencilInteraction:(UIPencilInteraction *)interaction
+        didReceiveSqueeze:(UIPencilInteractionSqueeze *)squeeze API_AVAILABLE(ios(17.5)) {
+    // Open on squeeze onset; changing or releasing the squeeze must never fire another action.
+    if (squeeze.phase != UIPencilInteractionPhaseBegan)
+        return;
+    if (UIPencilInteraction.preferredSqueezeAction == UIPencilPreferredActionIgnore)
+        return;
+    if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
+        self.menuClosing || self.itemDragging || self.paneSwiping)
+        return;
+
+    CGPoint tip;
+    if (squeeze.hoverPose) {
+        tip = squeeze.hoverPose.location; // same coordinate space as self.screen
+    } else if (self.sceneHoverLastAt > 0 &&
+               CACurrentMediaTime() - self.sceneHoverLastAt < 0.75) {
+        tip = self.sceneHoverLastPoint;   // transient hover loss during squeeze
+    } else {
+        [self appendLine:@"[pencil] squeeze ignored (no live pen location)"];
+        return;
+    }
+
+    int gx = 0, gy = 0;
+    if (![self mapPoint:tip toGameX:&gx toGameY:&gy])
+        return;
+    [JVMLauncher postCancelArmedTap]; // no armed left-click may follow squeeze
+    [self openEngineMenuAtGameX:gx gameY:gy anchor:tip];
+    // Normal short right-click menus are drag-select-only. With no finger held,
+    // that menu would be inert. Force the existing tappable/persistent menu.
+    self.pencilSqueezeMenuPending = YES;
+    [self haptic:RMHapticMenuOpen];
+    [self appendLine:[NSString stringWithFormat:@"[pencil] squeeze -> menu @%d,%d", gx, gy]];
+}
+
 - (BOOL)mapPoint:(CGPoint)p toGameX:(int *)gx toGameY:(int *)gy {
     UIImage *img = self.screen.image;
     CGFloat iw = img ? img.size.width : 0, ih = img ? img.size.height : 0;
@@ -9199,7 +9321,9 @@ static CGRect mapRectFromArr(NSArray *a) {
     CGFloat fullH  = kMenuHeaderViewH + entries.count * kMenuRowViewH;
     BOOL tooTall = fullH > availH;
 
-    if (hasSub || tooTall || self.shiftHeld) {
+    BOOL pencilMenu = self.pencilSqueezeMenuPending;
+    self.pencilSqueezeMenuPending = NO;
+    if (pencilMenu || hasSub || tooTall || self.shiftHeld) {
         self.menuTapMode = YES;
         [self buildTapMenuWithEntries:entries drilledParent:-1];
     } else {
@@ -9733,6 +9857,7 @@ static CGRect mapRectFromArr(NSArray *a) {
 }
 
 - (void)teardownMenuViews {
+    self.pencilSqueezeMenuPending = NO;
     [self.menuContainer removeFromSuperview];
     [self.menuDismissLayer removeFromSuperview];
     self.menuContainer = nil;
@@ -10343,9 +10468,13 @@ static CGRect mapRectFromArr(NSArray *a) {
     if (self.presentedViewController) return;
     int cur = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"interfaceRenderH"];
     if (cur < 480 || cur > 600) cur = 540;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"Interface size"
-        message:@"Bigger UI shows the HUD (chat, minimap, inventory) larger but less of the world. Applies on next launch."
-        preferredStyle:UIAlertControllerStyleActionSheet];
+    BOOL ipad = MIN(self.view.bounds.size.width, self.view.bounds.size.height) >= kLargeScreenPt;
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:ipad ? @"iPad display" : @"Interface size"
+                         message:ipad
+                             ? @"Interface size changes the HUD size. Sharpness renders more pixels, but makes the game UI smaller and uses more power. Changes apply next launch."
+                             : @"Bigger UI shows the HUD (chat, minimap, inventory) larger but less of the world. Applies on next launch."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
     // label -> renderH (smaller canvas = larger UI)
     NSArray *opts = @[@[@"Small", @600], @[@"Default", @540], @[@"Large", @480]];
     for (NSArray *o in opts) {
@@ -10357,6 +10486,25 @@ static CGRect mapRectFromArr(NSArray *a) {
             [[NSUserDefaults standardUserDefaults] setInteger:h forKey:@"interfaceRenderH"];
             [self appendLine:[NSString stringWithFormat:@"[shell] interface size -> %@ (renderH %d), applies next launch", o[0], h]];
         }]];
+    }
+    if (ipad) {
+        int sharpness = (int)[[NSUserDefaults standardUserDefaults] integerForKey:@"ipadSharpnessPct"];
+        if (sharpness != 125 && sharpness != 150 && sharpness != 200) sharpness = 100;
+        NSArray *sharpOpts = @[
+            @[@"Original sharpness (100%)", @100],
+            @[@"Sharper (125%)", @125],
+            @[@"High detail (150%)", @150],
+            @[@"Native pixels (up to 200%)", @200],
+        ];
+        for (NSArray *o in sharpOpts) {
+            int pct = [o[1] intValue];
+            NSString *title = [NSString stringWithFormat:@"%@%@", pct == sharpness ? @"✓ " : @"", o[0]];
+            [ac addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                                                 handler:^(UIAlertAction *a) {
+                [[NSUserDefaults standardUserDefaults] setInteger:pct forKey:@"ipadSharpnessPct"];
+                [self appendLine:[NSString stringWithFormat:@"[shell] iPad sharpness -> %d%%, applies next launch", pct]];
+            }]];
+        }
     }
     [ac addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     ac.popoverPresentationController.sourceView = self.pluginButton;
