@@ -12,6 +12,7 @@
 #import "RMResidency.h"
 #import "RMGameSettings.h"
 #import "RMGameUpdate.h"
+#import "RMInputVisualizerView.h"
 #import "RMHeat.h"
 #import "RMHeatNotice.h"
 #import "RouteCBridge.h"            // GPU Route C bridge (backend selected by RC_BACKEND_ANGLE in the build)
@@ -131,6 +132,8 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 /// the system took it (a call arrives, the app leaves the foreground). Never a click, and the one callback
 /// that cannot be reached by reasoning about which gesture won.
 @property (nonatomic, copy) void (^touchGone)(void);
+// Observational only; never changes or consumes the raw touch sequence.
+@property (nonatomic, copy) void (^debugTouches)(NSSet<UITouch *> *touches);
 @end
 
 @implementation RMSceneView {
@@ -142,6 +145,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
+    if (self.debugTouches) self.debugTouches(touches);
     if (event.allTouches.count != 1) {
         _multi = YES; // stays set until a fresh single-finger sequence starts
         return;
@@ -157,6 +161,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesMoved:touches withEvent:event];
+    if (self.debugTouches) self.debugTouches(touches);
     if (_multi) {
         return;
     }
@@ -173,6 +178,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesEnded:touches withEvent:event];
+    if (self.debugTouches) self.debugTouches(touches);
     if (_multi || !self.touchUp) {
         return;
     }
@@ -180,6 +186,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesCancelled:touches withEvent:event];
+    if (self.debugTouches) self.debugTouches(touches);
     // Not gated on _multi: the first finger of a sequence that grew into a pinch may well have armed a point.
     if (self.touchGone) {
         self.touchGone();
@@ -200,6 +207,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 @property (nonatomic, readonly) CGPoint landing;
 /// When the finger landed (CACurrentMediaTime), so the handler can tell a held drag from a quick swipe.
 @property (nonatomic, readonly) CFTimeInterval landedAt;
+@property (nonatomic, copy) void (^debugTouches)(NSSet<UITouch *> *touches);
 @end
 
 @implementation RMCameraPanRecognizer {
@@ -213,6 +221,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
+    if (self.debugTouches) self.debugTouches(touches);
     if (!_tracking) {
         _landing = [touches.anyObject locationInView:self.view];
         _landedAt = CACurrentMediaTime();
@@ -221,6 +230,7 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.debugTouches) self.debugTouches(touches);
     if (self.state == UIGestureRecognizerStatePossible && _tracking) {
         CGPoint p = [touches.anyObject locationInView:self.view];
         if (hypot(p.x - _landing.x, p.y - _landing.y) <= kSceneDragSlop) {
@@ -228,6 +238,14 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
         }
     }
     [super touchesMoved:touches withEvent:event];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.debugTouches) self.debugTouches(touches);
+    [super touchesEnded:touches withEvent:event];
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.debugTouches) self.debugTouches(touches);
+    [super touchesCancelled:touches withEvent:event];
 }
 @end
 
@@ -338,6 +356,8 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 @property (nonatomic, strong) UIStackView *devActionRow2; // Snapshot / Perf HUD / Test reconnect, in a row
 @property (nonatomic, strong) UILabel *perfOverlay;       // compact always-on fps·mem·thermal chip over the game
 @property (nonatomic, strong) UIButton *perfHudButton;    // dev-panel toggle for the perf overlay (label reflects state)
+// Input debugging is always passive and off by default; only active when Developer mode is enabled.
+@property (nonatomic, strong) RMInputVisualizerView *inputVisualizer;
 // Hidden capture field: becomes first responder to raise the soft keyboard; its change/return callbacks
 // are translated into AWT KeyEvents. It never actually holds text (a zero-width sentinel keeps backspace
 // firing, and every change returns NO).
@@ -996,6 +1016,7 @@ static NSString *const kRMDebugPipOffKey = @"RMDebugPipOff";
 @property (nonatomic, assign) BOOL pluginRailOn;
 @property (nonatomic, assign) BOOL debugOn;
 @property (nonatomic, assign) BOOL developerMode;
+@property (nonatomic, assign) BOOL inputVisualizerOn;
 @property (nonatomic, assign) BOOL profilesAvailable; // gates the "Config profiles" row (bridge wired)
 @property (nonatomic, assign) BOOL infoBoxAvailable;  // gates the "Infoboxes" row (bridge wired)
 @property (nonatomic, copy) void (^onEditControls)(void);
@@ -1006,6 +1027,7 @@ static NSString *const kRMDebugPipOffKey = @"RMDebugPipOff";
 @property (nonatomic, copy) void (^onTogglePluginRail)(BOOL);
 @property (nonatomic, copy) void (^onToggleDebug)(BOOL);
 @property (nonatomic, copy) void (^onToggleDeveloper)(BOOL);
+@property (nonatomic, copy) void (^onToggleInputVisualizer)(BOOL);
 @end
 
 @implementation RMSettingsViewController
@@ -1091,9 +1113,9 @@ static NSString *const kRMDebugPipOffKey = @"RMDebugPipOff";
 // Developer mode, Show debug panel, and in Debug builds the Picture-in-Picture switch.
 - (NSInteger)developerRows {
 #if DEBUG
-    return 3;
+    return 4;
 #else
-    return 2;
+    return 3;
 #endif
 }
 
@@ -1155,9 +1177,14 @@ static NSString *const kRMDebugPipOffKey = @"RMDebugPipOff";
             cell.textLabel.text = @"Show debug panel";
             cell.accessoryView = [self switchOn:self.debugOn action:@selector(onDebug:)];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (ip.row == 2) {
+            cell.textLabel.text = @"Show Input Visualizer";
+            cell.detailTextLabel.text = @"Pencil hover, finger paths and gesture decisions (recordable)";
+            cell.accessoryView = [self switchOn:self.inputVisualizerOn action:@selector(onInputVisualizer:)];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
         }
 #if DEBUG
-        else {
+        else if (ip.row == 3) {
             cell.textLabel.text = @"Picture-in-Picture";
             cell.detailTextLabel.text = @"Off from the next launch: the game draws without the video layer";
             cell.accessoryView = [self switchOn:![[NSUserDefaults standardUserDefaults] boolForKey:kRMDebugPipOffKey]
@@ -1204,6 +1231,11 @@ static NSString *const kRMDebugPipOffKey = @"RMDebugPipOff";
     self.debugOn = sw.on;
     if (self.onToggleDebug)
         self.onToggleDebug(sw.on);
+}
+- (void)onInputVisualizer:(UISwitch *)sw {
+    self.inputVisualizerOn = sw.on;
+    if (self.onToggleInputVisualizer)
+        self.onToggleInputVisualizer(sw.on);
 }
 #if DEBUG
 - (void)onPip:(UISwitch *)sw {
@@ -1903,6 +1935,9 @@ static NSString *const kLayoutNoticeBody =
     sceneView.touchGone = ^{
         [JVMLauncher postCancelArmedTap];
     };
+    sceneView.debugTouches = ^(NSSet<UITouch *> *touches) {
+        [weakSelfForScene observeInputTouches:touches];
+    };
     self.screen = sceneView;
     self.screen.translatesAutoresizingMaskIntoConstraints = NO;
     self.screen.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1.0];
@@ -1910,6 +1945,19 @@ static NSString *const kLayoutNoticeBody =
     self.screen.layer.magnificationFilter = kCAFilterLinear;     // smooth when scaled to native res
     self.screen.userInteractionEnabled = YES;                    // receive the game gestures
     [self.view addSubview:self.screen];
+
+    // Fully transparent, non-interactive debug overlay in the exact same coordinate system as the game.
+    // Its markers are UIKit observations, not generated game clicks. Never loaded without Developer mode.
+    self.inputVisualizer = [[RMInputVisualizerView alloc] initWithFrame:CGRectZero];
+    self.inputVisualizer.translatesAutoresizingMaskIntoConstraints = NO;
+    self.inputVisualizer.hidden = YES;
+    [self.screen addSubview:self.inputVisualizer];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.inputVisualizer.topAnchor constraintEqualToAnchor:self.screen.topAnchor],
+        [self.inputVisualizer.bottomAnchor constraintEqualToAnchor:self.screen.bottomAnchor],
+        [self.inputVisualizer.leadingAnchor constraintEqualToAnchor:self.screen.leadingAnchor],
+        [self.inputVisualizer.trailingAnchor constraintEqualToAnchor:self.screen.trailingAnchor],
+    ]];
 
     // Phase 5 control scheme on the game view: tap = left click (walk/interact/menu-entry), long-press =
     // drag-to-select menu, one-finger drag = camera rotate, pinch = zoom. The hold, the drag and the zoom are
@@ -1926,11 +1974,14 @@ static NSString *const kLayoutNoticeBody =
     longPress.allowableMovement = kSceneDragSlop;
     longPress.delegate = self;
     [self.screen addGestureRecognizer:longPress];
-    UIPanGestureRecognizer *camPan = [[RMCameraPanRecognizer alloc]
+    RMCameraPanRecognizer *camPan = [[RMCameraPanRecognizer alloc]
         initWithTarget:self
                 action:@selector(onCameraPan:)];
     camPan.minimumNumberOfTouches = 1;
     camPan.maximumNumberOfTouches = 1;
+    camPan.debugTouches = ^(NSSet<UITouch *> *touches) {
+        [weakSelfForScene observeInputTouches:touches];
+    };
     [self.screen addGestureRecognizer:camPan];
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(onPinch:)];
@@ -2972,6 +3023,16 @@ static const int kCamPitchPxPerSec = 200;
     if (!self.developerMode)
         self.debugPanel.hidden = YES;
     [self applyPerfOverlayState]; // the perf overlay is a dev surface too — it must vanish when dev mode is off
+    [self applyInputVisualizerState];
+}
+- (void)setInputVisualizerEnabled:(BOOL)on {
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"inputVisualizerOn"];
+    [self applyInputVisualizerState];
+}
+- (void)applyInputVisualizerState {
+    BOOL enabled = self.developerMode && [[NSUserDefaults standardUserDefaults] boolForKey:@"inputVisualizerOn"];
+    self.inputVisualizer.hidden = !enabled;
+    if (!enabled) [self.inputVisualizer clearInput];
 }
 - (void)setDeveloperModeEnabled:(BOOL)on {
     self.developerMode = on;
@@ -2989,6 +3050,7 @@ static const int kCamPitchPxPerSec = 200;
     vc.pluginRailOn = !([ud objectForKey:@"rightBarRailHidden"] != nil && [ud boolForKey:@"rightBarRailHidden"]);
     vc.debugOn = !self.debugPanel.hidden;
     vc.developerMode = self.developerMode;
+    vc.inputVisualizerOn = [[NSUserDefaults standardUserDefaults] boolForKey:@"inputVisualizerOn"];
     vc.profilesAvailable = [JVMLauncher profilesAvailable];
     vc.infoBoxAvailable = [JVMLauncher infoBoxAvailable];
     vc.onEditControls = ^{
@@ -3016,6 +3078,9 @@ static const int kCamPitchPxPerSec = 200;
     };
     vc.onToggleDeveloper = ^(BOOL on) {
         [ws setDeveloperModeEnabled:on];
+    };
+    vc.onToggleInputVisualizer = ^(BOOL on) {
+        [ws setInputVisualizerEnabled:on];
     };
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
     nav.modalPresentationStyle = UIModalPresentationFormSheet;
@@ -8731,6 +8796,19 @@ static CGRect mapRectFromArr(NSArray *a) {
 
 // Map a point (in the screen image view's coordinate space) to gamepack-canvas pixels, honouring the
 // ScaleAspectFit letterbox. Returns NO if the point is in the letterbox margin (outside the game frame).
+// Input debug observation: UIKit touch samples are passed through unchanged to the existing game pipeline.
+- (void)observeInputTouches:(NSSet<UITouch *> *)touches {
+    if (!self.inputVisualizer || self.inputVisualizer.hidden) return;
+    [self.inputVisualizer observeTouches:touches];
+    for (UITouch *touch in touches) {
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) continue;
+        int gx = 0, gy = 0;
+        if ([self mapPoint:[touch locationInView:self.screen] toGameX:&gx toGameY:&gy])
+            [self.inputVisualizer setMappedTouchX:gx y:gy];
+        break;
+    }
+}
+
 // HOVER-1: map Apple Pencil proximity to a *movement-only* AWT mouse event. This is the
 // same JNI bridge already used for the native right-click menu's highlight tracking.
 // No click, right-click, shift, action, or gameplay automation can originate here.
@@ -8739,6 +8817,7 @@ static CGRect mapRectFromArr(NSArray *a) {
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled ||
         g.state == UIGestureRecognizerStateFailed) {
+        [self.inputVisualizer setHoverAt:CGPointZero gameX:0 gameY:0 active:NO];
         if (self.sceneHoverActive) {
             self.sceneHoverActive = NO;
             [JVMLauncher postClearHover];
@@ -8754,6 +8833,7 @@ static CGRect mapRectFromArr(NSArray *a) {
         return;
     int x = 0, y = 0;
     if (![self mapPoint:[g locationInView:self.screen] toGameX:&x toGameY:&y]) {
+        [self.inputVisualizer setHoverAt:CGPointZero gameX:0 gameY:0 active:NO];
         if (self.sceneHoverActive) {
             self.sceneHoverActive = NO;
             [JVMLauncher postClearHover];
@@ -8769,6 +8849,7 @@ static CGRect mapRectFromArr(NSArray *a) {
     self.sceneHoverLastPoint = [g locationInView:self.screen];
     self.sceneHoverLastAt = CACurrentMediaTime();
     self.sceneHoverActive = YES;
+    [self.inputVisualizer setHoverAt:[g locationInView:self.screen] gameX:x gameY:y active:YES];
     [JVMLauncher postMoveX:x y:y];
 }
 
@@ -8806,6 +8887,7 @@ static CGRect mapRectFromArr(NSArray *a) {
     // Normal short right-click menus are drag-select-only. With no finger held,
     // that menu would be inert. Force the existing tappable/persistent menu.
     self.pencilSqueezeMenuPending = YES;
+    [self.inputVisualizer setGestureKind:@"Pencil squeeze → context menu"];
     [self haptic:RMHapticMenuOpen];
     [self appendLine:[NSString stringWithFormat:@"[pencil] squeeze -> menu @%d,%d", gx, gy]];
 }
@@ -8895,6 +8977,7 @@ static CGRect mapRectFromArr(NSArray *a) {
 // land on the lift instead of a few frames after it.
 - (void)onSceneTouchUp:(CGPoint)origin strayed:(CGFloat)strayed held:(NSTimeInterval)held {
     if (strayed <= kSceneDragSlop && held <= [RMGameSettings longPressMs] / 1000.0 + kSceneTapHoldMargin) {
+        [self.inputVisualizer setGestureKind:@"Tap → game input"];
         [self worldTapAtScreenPoint:origin];
     }
     // Whatever that did, this touch is finished with its arm — and only the plain world click consumes one.
@@ -9703,6 +9786,7 @@ static CGRect mapRectFromArr(NSArray *a) {
             if (![self mapPoint:loc toGameX:&gx toGameY:&gy]) return; // letterbox
             [JVMLauncher postCancelArmedTap];                         // a hold opens the menu, it never walks
             [self openEngineMenuAtGameX:gx gameY:gy anchor:loc];
+            [self.inputVisualizer setGestureKind:@"Long press → context menu"];
             [self haptic:RMHapticMenuOpen];
             [self appendLine:[NSString stringWithFormat:@"[shell] long-press -> engine menu @game %d,%d", gx, gy]];
             break;
@@ -9900,6 +9984,7 @@ static CGRect mapRectFromArr(NSArray *a) {
                                   ? CACurrentMediaTime() - ((RMCameraPanRecognizer *)g).landedAt
                                   : 0;
         self.paneSwiping = NO;
+        [self.inputVisualizer setGestureKind:@"Drag → classifying"];
         [g setTranslation:CGPointZero inView:self.screen];
         // World map open: a 1-finger drag that BEGINS inside the Key list or the open surface dropdown
         // SCROLLS that list (wheel events parked over it); inside the map window it pans the MAP (bridge ->
@@ -9915,6 +10000,7 @@ static CGRect mapRectFromArr(NSArray *a) {
                     self.mapListScrollAcc = 0;
                     self.mapPanning = NO;
                     self.chatScrolling = NO;
+                    [self.inputVisualizer setGestureKind:@"World map list scroll"];
                     [self appendLine:@"[map] list scroll begin"];
                     return;
                 }
@@ -9924,6 +10010,7 @@ static CGRect mapRectFromArr(NSArray *a) {
                     self.mapListScrolling = NO;
                     self.mapPanAccX = self.mapPanAccY = 0;
                     self.chatScrolling = NO;
+                    [self.inputVisualizer setGestureKind:@"World map pan"];
                     [self appendLine:@"[map] pan begin"];
                     return;
                 }
@@ -9937,6 +10024,7 @@ static CGRect mapRectFromArr(NSArray *a) {
         if (self.chatDialogueActive && self.dialogueIsPrompt && self.dialoguePromptList.size.width > 0 && [self mapPoint:landing toGameX:&lx toGameY:&ly] && CGRectContainsPoint(self.dialoguePromptList, CGPointMake(lx, ly))) {
             self.chatScrolling = YES;
             self.chatScrollAccum = 0;
+            [self.inputVisualizer setGestureKind:@"Search results scroll"];
             [self appendLine:@"[shell] search results scroll begin"];
             return;
         }
@@ -9948,6 +10036,7 @@ static CGRect mapRectFromArr(NSArray *a) {
                 && CGRectContainsPoint(self.chatScrollCanvas, CGPointMake(gx, gy))) {
             self.chatScrolling = YES;
             self.chatScrollAccum = 0;
+            [self.inputVisualizer setGestureKind:@"Chat scroll"];
             [self appendLine:@"[shell] chat scroll begin"];
             return;
         }
@@ -9981,6 +10070,7 @@ static CGRect mapRectFromArr(NSArray *a) {
                     self.itemDragLastY = sy;                          // seed the release-fallback point
                     [JVMLauncher postTouchType:0 x:sx y:sy button:1]; // MOUSE_PRESSED on the source slot
                     [self haptic:RMHapticDrag];                       // once per drag, as it lifts off the slot
+                    [self.inputVisualizer setGestureKind:@"Item drag"];
                     [self appendLine:[NSString stringWithFormat:@"[shell] item drag begin @canvas %d,%d", sx, sy]];
                     return;
                 }
@@ -9996,12 +10086,14 @@ static CGRect mapRectFromArr(NSArray *a) {
             self.ifaceScrolling = YES;
             self.ifaceWheelPt = CGPointMake(isx, isy);
             self.ifaceScrollAcc = 0;
+            [self.inputVisualizer setGestureKind:@"Interface scroll (bank/GE/etc)"];
             [self appendLine:[NSString stringWithFormat:@"[shell] iface scroll begin @canvas %d,%d", isx, isy]];
             return;
         }
         self.ifaceScrolling = NO;
         if (quickPaneSwipe) {
             self.paneSwiping = YES; // swallowed until the lift
+            [self.inputVisualizer setGestureKind:@"Quick pane swipe ignored"];
             [self appendLine:@"[shell] quick pane swipe ignored (nothing to scroll)"];
             return;
         }
@@ -10009,6 +10101,7 @@ static CGRect mapRectFromArr(NSArray *a) {
         // scenery rotating under the stale cursor lights up and the next walk-tap mis-clicks it.
         [JVMLauncher postClearHover];
         self.cameraDragAccX = self.cameraDragAccY = 0; // reset like mapPanAccX/Y and chatScrollAccum at gesture-begin
+        [self.inputVisualizer setGestureKind:@"Camera rotation"];
         [self appendLine:@"[shell] camera pan begin (1-finger)"];
         return;
     }
@@ -10164,6 +10257,16 @@ static CGRect mapRectFromArr(NSArray *a) {
 // pinch -> zoom via the mouse wheel. Accumulate the scale change into whole wheel notches; pinch out
 // (scale grows) = zoom in = negative rotation. Centroid is the wheel point so the gamepack zooms about it.
 - (void)onPinch:(UIPinchGestureRecognizer *)g {
+    if (!self.inputVisualizer.hidden) {
+        BOOL active = g.state == UIGestureRecognizerStateBegan || g.state == UIGestureRecognizerStateChanged;
+        NSMutableArray<NSValue *> *points = [NSMutableArray array];
+        if (active) {
+            for (NSUInteger i = 0; i < g.numberOfTouches; i++)
+                [points addObject:[NSValue valueWithCGPoint:[g locationOfTouch:i inView:self.screen]]];
+            [self.inputVisualizer setGestureKind:@"Pinch zoom"];
+        }
+        [self.inputVisualizer showPinchPoints:points active:active];
+    }
     if (![JVMLauncher bridgeReady]) return;
     if (g.state == UIGestureRecognizerStateBegan) {
         [JVMLauncher postCancelArmedTap]; // two fingers zoom, they never tap
