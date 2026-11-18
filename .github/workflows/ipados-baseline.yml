@@ -1,8 +1,8 @@
-name: SkyRune 0.10.2 Pencil Integration
+name: SkyRune Input Visualizer Build
 
 on:
   push:
-    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil]
+    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer]
   workflow_dispatch:
 
 permissions:
@@ -59,7 +59,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-0.10.2-Pencil-Test-IPA
+          name: SkyRune-Input-Visualizer-Test-IPA
           path: dist/ci/*.ipa
           if-no-files-found: error
           retention-days: 14
