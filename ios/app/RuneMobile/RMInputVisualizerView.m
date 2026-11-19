@@ -120,9 +120,10 @@
 }
 
 - (void)setGestureKind:(NSString *)kind {
-    if (self.hidden) return;
-    self.gestureKind = [kind copy] ?: @"Idle";
-    [self refreshReadout];
+    // Assign the backing ivar: using self.gestureKind here recursively calls this setter
+    // and causes a stack overflow during initWithFrame:, before the game can start.
+    _gestureKind = [kind copy] ?: @"Idle";
+    if (!self.hidden) [self refreshReadout];
 }
 
 - (void)refreshReadout {
