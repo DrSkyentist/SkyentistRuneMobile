@@ -10081,7 +10081,12 @@ static CGRect mapRectFromArr(NSArray *a) {
         // notches the engine routes to the hovered scrollable) instead of rotating the camera. Hit-tested in the
         // engine, so only a genuinely-scrollable spot diverts the drag — over the bare viewport it stays a rotate.
         int isx = 0, isy = 0;
-        if ([self mapPoint:[g locationInView:self.screen] toGameX:&isx toGameY:&isy]
+        // The pan recognizer does not begin until the finger has travelled kSceneDragSlop
+        // from its landing point. Test the ORIGINAL touch-down location, not the point
+        // after that travel: at the bank/list edge the latter may already be outside
+        // the scrollable widget and incorrectly route a bank swipe to camera rotation.
+        // Keep the wheel parked at the same start point that decided the gesture.
+        if ([self mapPoint:landing toGameX:&isx toGameY:&isy]
                 && [JVMLauncher engineScrollableAtX:isx y:isy]) {
             self.ifaceScrolling = YES;
             self.ifaceWheelPt = CGPointMake(isx, isy);
