@@ -265,6 +265,11 @@ typedef NS_ENUM(NSInteger, RMJitScriptCheck) {
 /// `x`,`y` are gamepack-canvas (765x503) pixels. Call on the main thread.
 + (void)postMoveX:(int)x y:(int)y;
 
+/// Passive Pencil/trackpad hover. Deferred by Java while a click owns the pointer; never posts a click.
+/// Optional on older jars: unavailable hover is ignored rather than routed through the unsafe menu-move path.
++ (void)postHoverX:(int)x y:(int)y;
++ (void)postEndHover;
+
 /// Stream one real move sample of the finger that armed a tap (JavaBridge.onTapMove). Called for every
 /// sample of a one-finger scene touch; the bridge replays it as a drag of the press it is holding and drops
 /// it when there is no such press, so the shell does not have to know what the gesture became. Main thread.

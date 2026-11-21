@@ -59,6 +59,7 @@ static jmethodID gMidSetCameraZoom = NULL; // setCameraZoom(I)V: set it as the s
 static jmethodID gMidRequestResize = NULL; // requestResize(II)V: resize the canvas mid-session (optional)
 static jmethodID gMidCanvasW = NULL, gMidCanvasH = NULL; // canvasWidth()I / canvasHeight()I (optional)
 static jmethodID gMidTouch = NULL, gMidClick = NULL, gMidClickPrecise = NULL, gMidMove = NULL;
+static jmethodID gMidHover = NULL, gMidEndHover = NULL; // passive hover arbitration (optional)
 static jmethodID gMidWheel = NULL, gMidCamera = NULL, gMidText = NULL, gMidKey = NULL;
 static jmethodID gMidCameraHold = NULL; // setCameraHold(II)V — a held arrow turns at a pixel RATE per second
 static jmethodID gMidInputOpen = NULL, gMidClearHover = NULL;
@@ -292,6 +293,16 @@ static BOOL ensureBridge(void) {
     // Optional (not in the mandatory set above, so an older jar without it still boots the bridge). Each one clears
     // its own miss: a NoSuchMethodError left pending makes every later JNI call illegal, so one missing optional
     // method would otherwise fail the lookups after it and keep the bridge from ever coming up.
+    gMidHover = (*env)->GetStaticMethodID(env, global, "onHover", "(II)V");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        gMidHover = NULL;
+    }
+    gMidEndHover = (*env)->GetStaticMethodID(env, global, "endHover", "()V");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        gMidEndHover = NULL;
+    }
     gMidCameraHold = (*env)->GetStaticMethodID(env, global, "setCameraHold", "(II)V");
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
@@ -3444,6 +3455,20 @@ static BOOL pipFeedMarkerSaysMain(void) {
     JNIEnv *env = gMainEnv;
     (*env)->CallStaticVoidMethod(env, gBridgeClass, gMidMove, (jint)x, (jint)y);
     if ((*env)->ExceptionCheck(env)) { bridgeNoteClear(env, "JVMLauncher.postMove"); }
+}
+
++ (void)postHoverX:(int)x y:(int)y {
+    if (!ensureBridge() || !gMidHover || !gMidEndHover) return;
+    JNIEnv *env = gMainEnv;
+    (*env)->CallStaticVoidMethod(env, gBridgeClass, gMidHover, (jint)x, (jint)y);
+    if ((*env)->ExceptionCheck(env)) { bridgeNoteClear(env, "JVMLauncher.postHover"); }
+}
+
++ (void)postEndHover {
+    if (!ensureBridge() || !gMidHover || !gMidEndHover) return;
+    JNIEnv *env = gMainEnv;
+    (*env)->CallStaticVoidMethod(env, gBridgeClass, gMidEndHover);
+    if ((*env)->ExceptionCheck(env)) { bridgeNoteClear(env, "JVMLauncher.postEndHover"); }
 }
 
 + (void)postTapMoveX:(int)x y:(int)y {

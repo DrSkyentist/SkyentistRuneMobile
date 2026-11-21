@@ -369,7 +369,7 @@ public class JavaBridgePressTimingTest
 	{
 		when(client.getGameState()).thenReturn(net.runelite.api.GameState.LOGIN_SCREEN);
 		final List<java.util.function.BooleanSupplier> drain = new ArrayList<>();
-		final ClientThread ct = mock(ClientThread.class);
+		final ClientThread ct = inlineClientThread();
 		doAnswer(inv ->
 		{
 			drain.add(inv.getArgument(0));

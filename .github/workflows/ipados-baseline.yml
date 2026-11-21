@@ -1,8 +1,8 @@
-name: SkyRune Input Visualizer Build
+name: SkyRune Pencil Input Fix
 
 on:
   push:
-    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer]
+    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer, fix/pencil-input-ownership]
   workflow_dispatch:
 
 permissions:
@@ -41,6 +41,23 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      - name: Verify shared bridge contract
+        run: |
+          tools/shared-contract/check-contract.sh
+          python3 tools/shared-contract/gen-bridge-api.py --check
+
+      - name: Verify pointer, click, key and text input regressions
+        run: ./gradlew :client:test --tests 'net.runelite.client.headless.JavaBridge*Test' --no-daemon --console=plain
+
+      - name: Upload input test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: SkyRune-Pencil-Input-Test-Results
+          path: runelite-client/build/test-results/test/*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Fetch verified iOS JRE from upstream
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,7 +76,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-Input-Visualizer-Test-IPA
+          name: SkyRune-Pencil-Input-Fix-IPA
           path: dist/ci/*.ipa
           if-no-files-found: error
           retention-days: 14

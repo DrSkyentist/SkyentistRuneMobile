@@ -127,7 +127,9 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 @property (nonatomic, copy) void (^touchMoved)(CGPoint point);
 /// A one-finger sequence that no recognizer took: where it landed, the furthest it ever strayed from there,
 /// and how long it lasted. The handler decides whether that is a click.
-@property (nonatomic, copy) void (^touchUp)(CGPoint origin, CGFloat strayed, NSTimeInterval held);
+@property (nonatomic, copy) void (^touchUp)(CGPoint origin, CGFloat strayed, NSTimeInterval held, UITouchType type);
+@property (nonatomic, readonly) BOOL contactActive;
+@property (nonatomic, copy) void (^contactBegan)(void);
 /// The sequence ended without a lift of its own — a recognizer claimed it (the camera, the hold, the zoom) or
 /// the system took it (a call arrives, the app leaves the foreground). Never a click, and the one callback
 /// that cannot be reached by reasoning about which gesture won.
@@ -141,16 +143,24 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
     NSTimeInterval _landed;
     CGFloat _strayed;
     BOOL _multi; // a second finger joined: this sequence belongs to the pinch, not to a tap
+    UITouchType _touchType;
+    NSMutableSet<UITouch *> *_contacts;
 }
+
+- (BOOL)contactActive { return _contacts.count > 0; }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesBegan:touches withEvent:event];
     if (self.debugTouches) self.debugTouches(touches);
+    if (!_contacts) _contacts = [NSMutableSet set];
+    [_contacts unionSet:touches];
+    if (self.contactBegan) self.contactBegan();
     if (event.allTouches.count != 1) {
         _multi = YES; // stays set until a fresh single-finger sequence starts
         return;
     }
     _origin = [touches.anyObject locationInView:self];
+    _touchType = touches.anyObject.type;
     _landed = CACurrentMediaTime();
     _strayed = 0;
     _multi = NO;
@@ -179,14 +189,16 @@ static const NSTimeInterval kSceneTapHoldMargin = 0.05;
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesEnded:touches withEvent:event];
     if (self.debugTouches) self.debugTouches(touches);
+    [_contacts minusSet:touches];
     if (_multi || !self.touchUp) {
         return;
     }
-    self.touchUp(_origin, _strayed, CACurrentMediaTime() - _landed);
+    self.touchUp(_origin, _strayed, CACurrentMediaTime() - _landed, _touchType);
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [super touchesCancelled:touches withEvent:event];
     if (self.debugTouches) self.debugTouches(touches);
+    [_contacts minusSet:touches];
     // Not gated on _multi: the first finger of a sequence that grew into a pinch may well have armed a point.
     if (self.touchGone) {
         self.touchGone();
@@ -398,8 +410,10 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 // "actively rendering" jetsam band AND showing the live login screen (the start of the real UI).
 @property (nonatomic, strong) UIImageView *screen;
 // iPadOS 16.1+: Apple Pencil hover (and trackpad pointer hover) passes through the existing
-// no-click JavaBridge.onMove / clearHover path. Finger taps and drags are unchanged.
+// passive JavaBridge.onHover / endHover path. Explicit menu tracking uses onMove separately.
 @property (nonatomic, strong) UIHoverGestureRecognizer *sceneHover;
+@property (nonatomic, assign) BOOL scenePanActive;
+@property (nonatomic, assign) BOOL scenePinchActive;
 @property (nonatomic, assign) BOOL sceneHoverActive;
 @property (nonatomic, assign) int sceneHoverLastX;
 @property (nonatomic, assign) int sceneHoverLastY;
@@ -1925,8 +1939,11 @@ static NSString *const kLayoutNoticeBody =
     sceneView.touchMoved = ^(CGPoint point) {
         [weakSelfForScene onSceneTouchMoved:point];
     };
-    sceneView.touchUp = ^(CGPoint origin, CGFloat strayed, NSTimeInterval held) {
-        [weakSelfForScene onSceneTouchUp:origin strayed:strayed held:held];
+    sceneView.touchUp = ^(CGPoint origin, CGFloat strayed, NSTimeInterval held, UITouchType type) {
+        [weakSelfForScene onSceneTouchUp:origin strayed:strayed held:held type:type];
+    };
+    sceneView.contactBegan = ^{
+        [weakSelfForScene suspendSceneHover];
     };
     // No self needed, and nothing to decide: a sequence that ends this way never clicks. The gesture handlers
     // drop the arm themselves when they begin (promptly, rather than at the lift of a long drag), but each of
@@ -1985,6 +2002,7 @@ static NSString *const kLayoutNoticeBody =
     [self.screen addGestureRecognizer:camPan];
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(onPinch:)];
+    pinch.allowedTouchTypes = @[@(UITouchTypeDirect)]; // a Pencil plus a finger is not a two-finger zoom
     [self.screen addGestureRecognizer:pinch];
 
     // HOVER-1: Apple Pencil hovering over the iPad game canvas should behave like a desktop
@@ -1995,6 +2013,9 @@ static NSString *const kLayoutNoticeBody =
         if (@available(iOS 16.1, *)) {
             UIHoverGestureRecognizer *hover = [[UIHoverGestureRecognizer alloc]
                 initWithTarget:self action:@selector(onSceneHover:)];
+            hover.cancelsTouchesInView = NO;
+            hover.delaysTouchesBegan = NO;
+            hover.delaysTouchesEnded = NO;
             self.sceneHover = hover;
             [self.screen addGestureRecognizer:hover];
         }
@@ -8809,48 +8830,45 @@ static CGRect mapRectFromArr(NSArray *a) {
     }
 }
 
-// HOVER-1: map Apple Pencil proximity to a *movement-only* AWT mouse event. This is the
-// same JNI bridge already used for the native right-click menu's highlight tracking.
-// No click, right-click, shift, action, or gameplay automation can originate here.
-// Mouse/trackpad hover shares UIKit's recognizer; both are useful pointer inputs.
+- (void)suspendSceneHover {
+    self.sceneHoverActive = NO;
+    [self.inputVisualizer setHoverAt:CGPointZero gameX:0 gameY:0 active:NO];
+    [JVMLauncher postEndHover];
+}
+
+// Passive hover never owns an active contact/gesture. After lift, Java also defers hover until the
+// pending click has been consumed, including a hover-ended event and samples at a different point.
 - (void)onSceneHover:(UIHoverGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled ||
         g.state == UIGestureRecognizerStateFailed) {
-        [self.inputVisualizer setHoverAt:CGPointZero gameX:0 gameY:0 active:NO];
-        if (self.sceneHoverActive) {
-            self.sceneHoverActive = NO;
-            [JVMLauncher postClearHover];
-        }
+        [self suspendSceneHover];
         return;
     }
     if (g.state != UIGestureRecognizerStateBegan &&
         g.state != UIGestureRecognizerStateChanged)
         return;
-    // Never compete with a menu gesture, in-flight item drag, or a not-yet-ready engine.
+    // Never compete with contact, camera/scroll/pinch gestures, or native menus.
     if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
-        self.menuClosing || self.itemDragging)
+        self.menuClosing || self.itemDragging || self.scenePanActive || self.scenePinchActive ||
+        ((RMSceneView *)self.screen).contactActive)
         return;
     int x = 0, y = 0;
     if (![self mapPoint:[g locationInView:self.screen] toGameX:&x toGameY:&y]) {
-        [self.inputVisualizer setHoverAt:CGPointZero gameX:0 gameY:0 active:NO];
-        if (self.sceneHoverActive) {
-            self.sceneHoverActive = NO;
-            [JVMLauncher postClearHover];
-        }
+        [self suspendSceneHover];
+        self.sceneHoverLastAt = 0; // do not anchor a squeeze to an out-of-canvas location
         return;
     }
-    // UIKit can report the same point repeatedly while Pencil z-height changes.
-    // Avoid flooding the AWT queue with identical MOUSE_MOVED events.
+    // Refresh squeeze freshness even for a stationary Pencil; deduplicate only the engine movement.
+    self.sceneHoverLastPoint = [g locationInView:self.screen];
+    self.sceneHoverLastAt = CACurrentMediaTime();
+    [self.inputVisualizer setHoverAt:self.sceneHoverLastPoint gameX:x gameY:y active:YES];
     if (self.sceneHoverActive && x == self.sceneHoverLastX && y == self.sceneHoverLastY)
         return;
     self.sceneHoverLastX = x;
     self.sceneHoverLastY = y;
-    self.sceneHoverLastPoint = [g locationInView:self.screen];
-    self.sceneHoverLastAt = CACurrentMediaTime();
     self.sceneHoverActive = YES;
-    [self.inputVisualizer setHoverAt:[g locationInView:self.screen] gameX:x gameY:y active:YES];
-    [JVMLauncher postMoveX:x y:y];
+    [JVMLauncher postHoverX:x y:y];
 }
 
 // SQUEEZE-1: one deliberate Apple Pencil Pro squeeze opens the EXISTING native
@@ -8865,7 +8883,8 @@ static CGRect mapRectFromArr(NSArray *a) {
     if (UIPencilInteraction.preferredSqueezeAction == UIPencilPreferredActionIgnore)
         return;
     if (![JVMLauncher bridgeReady] || self.menuOpen || self.menuBuilding ||
-        self.menuClosing || self.itemDragging || self.paneSwiping)
+        self.menuClosing || self.itemDragging || self.paneSwiping || self.scenePanActive ||
+        self.scenePinchActive || ((RMSceneView *)self.screen).contactActive)
         return;
 
     CGPoint tip;
@@ -8882,6 +8901,7 @@ static CGRect mapRectFromArr(NSArray *a) {
     int gx = 0, gy = 0;
     if (![self mapPoint:tip toGameX:&gx toGameY:&gy])
         return;
+    [self suspendSceneHover];
     [JVMLauncher postCancelArmedTap]; // no armed left-click may follow squeeze
     [self openEngineMenuAtGameX:gx gameY:gy anchor:tip];
     // Normal short right-click menus are drag-select-only. With no finger held,
@@ -8916,6 +8936,9 @@ static CGRect mapRectFromArr(NSArray *a) {
 // (the enlarged chat tab buttons, the keyboard button, the side-tab grid). The control handles its own tap, so it
 // must not ALSO register as a walk-here click underneath. Touches on the bare game view (self.screen) pass through.
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    // Pencil uses squeeze for its context menu. A slower tip tap remains a left click on lift;
+    // fingers retain their existing long-press menu and drag thresholds.
+    if (gr == self.sceneLongPress && touch.type == UITouchTypePencil) return NO;
     // The native dialogue parchment owns its own taps (continue / option rows) — keep world/camera gestures off it.
     if (self.dialogueView && !self.dialogueView.hidden && [touch.view isDescendantOfView:self.dialogueView]) return NO;
     return ![touch.view isKindOfClass:[UIControl class]];
@@ -8975,9 +8998,10 @@ static CGRect mapRectFromArr(NSArray *a) {
 // The click goes to where the finger LANDED, not where it left: that is the point the user aimed at, it is the
 // point the engine has been resolving since contact (armTap), and committing to it is what makes the click
 // land on the lift instead of a few frames after it.
-- (void)onSceneTouchUp:(CGPoint)origin strayed:(CGFloat)strayed held:(NSTimeInterval)held {
-    if (strayed <= kSceneDragSlop && held <= [RMGameSettings longPressMs] / 1000.0 + kSceneTapHoldMargin) {
-        [self.inputVisualizer setGestureKind:@"Tap → game input"];
+- (void)onSceneTouchUp:(CGPoint)origin strayed:(CGFloat)strayed held:(NSTimeInterval)held type:(UITouchType)type {
+    BOOL pencil = type == UITouchTypePencil;
+    if (strayed <= kSceneDragSlop && (pencil || held <= [RMGameSettings longPressMs] / 1000.0 + kSceneTapHoldMargin)) {
+        [self.inputVisualizer setGestureKind:pencil ? @"Pencil tap → game input" : @"Tap → game input"];
         [self worldTapAtScreenPoint:origin];
     }
     // Whatever that did, this touch is finished with its arm — and only the plain world click consumes one.
@@ -9970,6 +9994,8 @@ static CGRect mapRectFromArr(NSArray *a) {
 // each step) to the bridge, which applies them to the camera yaw/pitch targets directly. The menuOpen
 // guard is belt-and-suspenders: if a long-press already claimed the touch, never also rotate.
 - (void)onCameraPan:(UIPanGestureRecognizer *)g {
+    self.scenePanActive = g.state == UIGestureRecognizerStateBegan || g.state == UIGestureRecognizerStateChanged;
+    if (g.state == UIGestureRecognizerStateBegan) [self suspendSceneHover];
     if (![JVMLauncher bridgeReady] || self.menuOpen) return;
     if (g.state == UIGestureRecognizerStateBegan) {
         [JVMLauncher postCancelArmedTap]; // this touch is a drag, not a tap: no click is coming
@@ -10257,6 +10283,8 @@ static CGRect mapRectFromArr(NSArray *a) {
 // pinch -> zoom via the mouse wheel. Accumulate the scale change into whole wheel notches; pinch out
 // (scale grows) = zoom in = negative rotation. Centroid is the wheel point so the gamepack zooms about it.
 - (void)onPinch:(UIPinchGestureRecognizer *)g {
+    self.scenePinchActive = g.state == UIGestureRecognizerStateBegan || g.state == UIGestureRecognizerStateChanged;
+    if (g.state == UIGestureRecognizerStateBegan) [self suspendSceneHover];
     if (!self.inputVisualizer.hidden) {
         BOOL active = g.state == UIGestureRecognizerStateBegan || g.state == UIGestureRecognizerStateChanged;
         NSMutableArray<NSValue *> *points = [NSMutableArray array];

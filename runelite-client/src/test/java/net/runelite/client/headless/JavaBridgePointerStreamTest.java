@@ -30,8 +30,12 @@ import java.awt.EventQueue;
 import java.awt.Toolkit;
 import java.awt.event.MouseEvent;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -39,8 +43,10 @@ import net.runelite.api.Menu;
 import net.runelite.api.MenuAction;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.Point;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.client.callback.ClientThread;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import org.junit.After;
 import org.junit.Before;
@@ -238,6 +244,250 @@ public class JavaBridgePointerStreamTest
 		assertEquals(1, cap.count(MouseEvent.MOUSE_WHEEL));
 	}
 
+	@Test
+	public void passiveHoverAloneNeverClicks() throws Exception
+	{
+		JavaBridge.onHover(TAP_X, TAP_Y);
+		pump();
+		assertEquals(1, cap.count(MouseEvent.MOUSE_MOVED));
+		assertEquals(0, cap.count(MouseEvent.MOUSE_PRESSED));
+		assertEquals(0, cap.count(MouseEvent.MOUSE_RELEASED));
+	}
+
+	@Test
+	public void hoverAndExitCannotStealAnArmedContact() throws Exception
+	{
+		JavaBridge.armTap(TAP_X, TAP_Y);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 100, TAP_Y + 100);
+		JavaBridge.endHover();
+		pump();
+		assertTrue("hover must neither move nor park the settling pointer", cap.all().isEmpty());
+
+		settleUntilArmed();
+		JavaBridge.onHover(TAP_X + 150, TAP_Y + 150);
+		pump();
+		assertTrue("the armed point still belongs to the contact", cap.all().isEmpty());
+	}
+
+	@Test
+	public void resumedHoverWaitsForAFastTapToBeConsumed() throws Exception
+	{
+		// Tip lands and lifts before the engine has finished resolving its location.
+		JavaBridge.armTap(TAP_X, TAP_Y);
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 80, TAP_Y + 50);
+		pump();
+		assertTrue("hover after lift must not disturb the committed settle", cap.all().isEmpty());
+
+		settleUntilClicked();
+		assertEquals(TAP_X, cap.first(MouseEvent.MOUSE_PRESSED).getX());
+		assertEquals(0, cap.count(MouseEvent.MOUSE_MOVED));
+		JavaBridge.onHover(TAP_X + 120, TAP_Y + 60);
+		pump();
+		assertEquals("wait through CLICKED, not just until the press is queued", 0, cap.count(MouseEvent.MOUSE_MOVED));
+
+		consumeTap();
+		assertEquals("coalesce to the latest hover", 1, cap.count(MouseEvent.MOUSE_MOVED));
+		assertEquals(TAP_X + 120, cap.first(MouseEvent.MOUSE_MOVED).getX());
+		assertEquals(TAP_Y + 60, cap.first(MouseEvent.MOUSE_MOVED).getY());
+		assertEquals("one physical tap, one press", 1, cap.count(MouseEvent.MOUSE_PRESSED));
+		assertEquals(0, cap.count(MouseEvent.MOUSE_EXITED));
+	}
+
+	@Test
+	public void endingHoverDiscardsItsDeferredPoint() throws Exception
+	{
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 80, TAP_Y + 50);
+		JavaBridge.endHover();
+		pump();
+		assertTrue(cap.all().isEmpty());
+		settleUntilClicked();
+		consumeTap();
+		assertEquals("do not replay a Pencil that has left hover range", 0, cap.count(MouseEvent.MOUSE_MOVED));
+		assertEquals(1, cap.count(MouseEvent.MOUSE_EXITED));
+		assertEquals(1, cap.count(MouseEvent.MOUSE_PRESSED));
+	}
+
+	@Test
+	public void cancelledContactAllowsHoverWithoutClicking() throws Exception
+	{
+		JavaBridge.armTap(TAP_X, TAP_Y);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 80, TAP_Y + 50);
+		JavaBridge.cancelArmedTap();
+		JavaBridge.tapTick(client);
+		pump();
+		assertEquals(1, cap.count(MouseEvent.MOUSE_MOVED));
+		assertEquals(TAP_X + 80, cap.first(MouseEvent.MOUSE_MOVED).getX());
+		assertEquals(0, cap.count(MouseEvent.MOUSE_PRESSED));
+	}
+
+	@Test
+	public void queuedTapKeepsPriorityOverHover() throws Exception
+	{
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		settleUntilClicked();
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		JavaBridge.onHover(TAP_X + 100, TAP_Y + 50);
+		pump();
+		cap.clear();
+		consumeTap();
+		assertEquals("queued tap owns the next move", TAP_X, cap.first(MouseEvent.MOUSE_MOVED).getX());
+		cap.clear();
+		settleUntilClicked();
+		assertEquals(0, cap.count(MouseEvent.MOUSE_MOVED));
+		consumeTap();
+		assertEquals(TAP_X + 100, cap.first(MouseEvent.MOUSE_MOVED).getX());
+	}
+
+	@Test
+	public void menuTrackingIsIndependentOfPassiveHover() throws Exception
+	{
+		when(client.isMenuOpen()).thenReturn(true);
+		JavaBridge.onHover(TAP_X + 80, TAP_Y + 50);
+		pump();
+		assertTrue("native menu owns the pointer", cap.all().isEmpty());
+		JavaBridge.onMove(TAP_X, TAP_Y);
+		pump();
+		assertEquals("explicit menu highlights must still work", TAP_X, cap.first(MouseEvent.MOUSE_MOVED).getX());
+		assertEquals(0, cap.count(MouseEvent.MOUSE_PRESSED));
+	}
+
+	@Test
+	public void preciseClickOwnsPointerThroughItsDeferredPress() throws Exception
+	{
+		final Queue<Runnable> later = deferClientTicks();
+		JavaBridge.onClickPrecise(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 100, TAP_Y + 50);
+		pump();
+		assertTrue(cap.all().isEmpty());
+		later.remove().run(); // post the UI click, still awaiting the next engine cycle
+		pump();
+		assertEquals(TAP_X, cap.first(MouseEvent.MOUSE_PRESSED).getX());
+		assertEquals(0, cap.count(MouseEvent.MOUSE_MOVED));
+		later.remove().run();
+		pump();
+		assertEquals(TAP_X + 100, cap.first(MouseEvent.MOUSE_MOVED).getX());
+	}
+
+	@Test
+	public void squeezeRightClickOwnsPointerUntilTheMenuOpens() throws Exception
+	{
+		final Queue<Runnable> later = deferClientTicks();
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON3);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 100, TAP_Y + 50);
+		pump();
+		assertTrue(cap.all().isEmpty());
+		later.remove().run();
+		pump();
+		assertEquals(MouseEvent.BUTTON3, cap.first(MouseEvent.MOUSE_PRESSED).getButton());
+		assertEquals(TAP_X, cap.first(MouseEvent.MOUSE_PRESSED).getX());
+		when(client.isMenuOpen()).thenReturn(true);
+		later.remove().run();
+		pump();
+		assertEquals("a newly open menu still owns the pointer", 0, cap.count(MouseEvent.MOUSE_MOVED));
+	}
+
+	@Test
+	public void loginWorldSelectionKeepsItsPointerWhileWaitingForDraws() throws Exception
+	{
+		when(client.getGameState()).thenReturn(GameState.LOGIN_SCREEN);
+		final ClientThread ct = inlineClientThread();
+		final List<BooleanSupplier> drains = new ArrayList<>();
+		final Queue<Runnable> later = new ArrayDeque<>();
+		doAnswer(inv ->
+		{
+			drains.add(inv.getArgument(0));
+			return null;
+		}).when(ct).invokeLater(any(BooleanSupplier.class));
+		doAnswer(inv ->
+		{
+			later.add(inv.getArgument(0));
+			return null;
+		}).when(ct).invokeLater(any(Runnable.class));
+		JavaBridge.setClientThread(ct);
+
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		cap.clear();
+		JavaBridge.onHover(TAP_X + 100, TAP_Y + 50);
+		JavaBridge.endHover();
+		assertFalse(drains.get(0).getAsBoolean());
+		assertFalse(drains.get(0).getAsBoolean());
+		pump();
+		assertTrue("hover cannot move or exit the world-list selection", cap.all().isEmpty());
+		assertTrue(drains.get(0).getAsBoolean());
+		pump();
+		assertEquals(TAP_X, cap.first(MouseEvent.MOUSE_PRESSED).getX());
+		assertEquals(0, cap.count(MouseEvent.MOUSE_EXITED));
+		later.remove().run();
+		pump();
+		assertEquals(1, cap.count(MouseEvent.MOUSE_EXITED));
+		assertEquals(0, cap.count(MouseEvent.MOUSE_MOVED));
+	}
+
+	@Test
+	public void previousTapCleanupCannotParkANewTap() throws Exception
+	{
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		settleUntilClicked();
+		final Queue<Runnable> later = deferClientTicks();
+		consumeTap(); // defer old tap's cleanup
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		cap.clear();
+		later.remove().run();
+		pump();
+		assertTrue("cleanup must not exit a newer tap's pointer", cap.all().isEmpty());
+	}
+
+	private Queue<Runnable> deferClientTicks()
+	{
+		final Queue<Runnable> later = new ArrayDeque<>();
+		final ClientThread ct = inlineClientThread();
+		doAnswer(inv ->
+		{
+			later.add(inv.getArgument(0));
+			return null;
+		}).when(ct).invokeLater(any(Runnable.class));
+		JavaBridge.setClientThread(ct);
+		return later;
+	}
+
+	private void settleUntilClicked() throws Exception
+	{
+		for (int i = 0; i < 40; i++)
+		{
+			JavaBridge.tapTick(client);
+			pump();
+			if (cap.count(MouseEvent.MOUSE_PRESSED) > 0)
+			{
+				return;
+			}
+		}
+		throw new AssertionError("tap never posted a press");
+	}
+
+	private static void consumeTap() throws Exception
+	{
+		final Method consume = JavaBridge.class.getDeclaredMethod("onMenuOptionClicked", MenuOptionClicked.class);
+		consume.setAccessible(true);
+		consume.invoke(null, new MenuOptionClicked(walkEntry()));
+		pump();
+	}
+
 	private static List<Integer> ids(List<MouseEvent> events)
 	{
 		return events.stream().map(MouseEvent::getID).collect(Collectors.toList());
@@ -318,6 +568,11 @@ public class JavaBridgePointerStreamTest
 		set("tapState", enumValue("TapState", "IDLE"));
 		set("tapUncommitted", false);
 		set("queuedTap", false);
+		set("hoverActive", false);
+		set("hoverPending", false);
+		set("hoverClickDepth", 0);
+		set("pressed", false);
+		set("parkVerifyFrames", 0);
 		set("entered", false);
 		set("focused", false);
 		set("lastPointerX", -1);

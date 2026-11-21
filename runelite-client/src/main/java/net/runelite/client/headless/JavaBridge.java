@@ -362,6 +362,12 @@ public final class JavaBridge
 	                                      // parkPointer runs from the client thread after a consumed tap)
 	private static boolean pressed;
 	private static int pressButton = MouseEvent.BUTTON1;
+	// Passive Pencil/trackpad hover is serialized on the client thread. A pending click owns the pointer
+	// until the engine consumes it; keep only the latest hover sample to replay afterwards.
+	private static boolean hoverActive;
+	private static boolean hoverPending;
+	private static int hoverX, hoverY;
+	private static int hoverClickDepth;
 	// Where we last put the synthetic pointer. Only read by parkPointer, so an exit can report the point the
 	// pointer left from the way a real toolkit's does, instead of a coordinate we made up. Written from both
 	// the client thread and the native UI thread; the pair is not written atomically, and a torn read costs an
@@ -945,16 +951,21 @@ public final class JavaBridge
 	 */
 	private static void clickOnLoginScreen(Canvas canvas, ClientThread ct, int x, int y)
 	{
-		postMove(canvas, x, y);
-		final int[] drains = {0};
-		ct.invokeLater(() ->
+		ct.invoke(() ->
 		{
-			if (++drains[0] < LOGIN_CLICK_DRAINS)
+			hoverClickDepth++;
+			postMove(canvas, x, y);
+			final int[] drains = {0};
+			ct.invokeLater(() ->
 			{
-				return false;
-			}
-			postClickButtons(canvas, x, y, MouseEvent.BUTTON1);
-			return true;
+				if (++drains[0] < LOGIN_CLICK_DRAINS)
+				{
+					return false;
+				}
+				postClickButtons(canvas, x, y, MouseEvent.BUTTON1);
+				ct.invokeLater(JavaBridge::finishHoverProtectedClick);
+				return true;
+			});
 		});
 	}
 
@@ -1036,8 +1047,7 @@ public final class JavaBridge
 	{
 		diagGeometry(c, "R", x, y);
 		hideClickCross(c);
-		postMove(canvas, x, y);
-		ct.invokeLater(() -> postClickButtons(canvas, x, y, MouseEvent.BUTTON3));
+		postHoverProtectedClick(canvas, ct, x, y, MouseEvent.BUTTON3);
 	}
 
 	/**
@@ -1215,6 +1225,7 @@ public final class JavaBridge
 		}
 		if (tapState == TapState.IDLE)
 		{
+			flushHover();
 			return;
 		}
 		final Canvas canvas = liveCanvas();
@@ -1749,7 +1760,25 @@ public final class JavaBridge
 		final ClientThread ct = clientThread;
 		if (ct != null)
 		{
-			ct.invokeLater(JavaBridge::parkPointer);
+			ct.invokeLater(JavaBridge::restorePointerAfterTap);
+		}
+		else
+		{
+			restorePointerAfterTap();
+		}
+	}
+
+	private static void restorePointerAfterTap()
+	{
+		// A newer tap or menu may have started before the deferred cleanup runs.
+		if (tapState != TapState.IDLE || hoverClickDepth > 0 || pressed || (client != null && client.isMenuOpen()))
+		{
+			return;
+		}
+		if (hoverActive || hoverPending)
+		{
+			hoverPending = true;
+			flushHover();
 		}
 		else
 		{
@@ -1995,8 +2024,7 @@ public final class JavaBridge
 		{
 			ct.invoke(() ->
 			{
-				postMove(canvas, x, y);
-				ct.invokeLater(() -> postClickButtons(canvas, x, y, MouseEvent.BUTTON1));
+				postHoverProtectedClick(canvas, ct, x, y, MouseEvent.BUTTON1);
 			});
 			return;
 		}
@@ -2213,6 +2241,82 @@ public final class JavaBridge
 		final long t = System.currentTimeMillis();
 		primeFocus(q, canvas, t, x, y);
 		postPointer(q, new MouseEvent(canvas, MouseEvent.MOUSE_MOVED, t + 1, 0, x, y, 0, false));
+	}
+
+	/** Passive hover only. Explicit menu tracking continues to use {@link #onMove}. */
+	public static void onHover(int shownX, int shownY)
+	{
+		final ClientThread ct = clientThread;
+		if (ct == null)
+		{
+			return;
+		}
+		ct.invoke(() ->
+		{
+			final long at = HudStrip.toEngine(shownX, shownY);
+			hoverX = HudStrip.x(at);
+			hoverY = HudStrip.y(at);
+			hoverActive = true;
+			hoverPending = true;
+			flushHover();
+		});
+	}
+
+	/** Ending hover must not send MOUSE_EXITED through a click that is still settling or being consumed. */
+	public static void endHover()
+	{
+		final ClientThread ct = clientThread;
+		if (ct == null)
+		{
+			return;
+		}
+		ct.invoke(() ->
+		{
+			hoverActive = false;
+			hoverPending = true;
+			flushHover();
+		});
+	}
+
+	private static void flushHover()
+	{
+		if (!hoverPending || tapState != TapState.IDLE || hoverClickDepth > 0 || pressed
+			|| (client != null && client.isMenuOpen()))
+		{
+			return;
+		}
+		final Canvas canvas = liveCanvas();
+		if (canvas == null)
+		{
+			return;
+		}
+		hoverPending = false;
+		if (hoverActive)
+		{
+			postMove(canvas, hoverX, hoverY);
+		}
+		else
+		{
+			parkPointer();
+		}
+	}
+
+	// UI and right-click paths have no TapState settle gate, but also need their move and press protected.
+	private static void postHoverProtectedClick(Canvas canvas, ClientThread ct, int x, int y, int button)
+	{
+		hoverClickDepth++;
+		postMove(canvas, x, y);
+		ct.invokeLater(() ->
+		{
+			postClickButtons(canvas, x, y, button);
+			ct.invokeLater(JavaBridge::finishHoverProtectedClick);
+		});
+	}
+
+	private static void finishHoverProtectedClick()
+	{
+		hoverClickDepth--;
+		flushHover();
 	}
 
 	/**

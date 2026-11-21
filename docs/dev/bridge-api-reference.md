@@ -13,7 +13,7 @@ how the bridge works, which thread each call runs on, and how to change it safel
 
 | Classes | Methods | JSON keys | System properties |
 |---:|---:|---:|---:|
-| 23 | 255 | 283 | 84 |
+| 23 | 257 | 283 | 84 |
 
 ## Classes
 
@@ -27,7 +27,7 @@ how the bridge works, which thread each call runs on, and how to change it safel
 - [`HudDataBridge`](#huddatabridge): 4 methods, 27 JSON keys, 2 properties
 - [`HudVeneerBridge`](#hudveneerbridge): 39 methods, 77 JSON keys, 10 properties
 - [`InfoBoxBridge`](#infoboxbridge): 6 methods, 9 JSON keys
-- [`JavaBridge`](#javabridge): 55 methods, 14 properties
+- [`JavaBridge`](#javabridge): 57 methods, 14 properties
 - [`LootTrackerBridge`](#loottrackerbridge): 6 methods, 14 JSON keys
 - [`MenuPeekBridge`](#menupeekbridge): 5 methods, 23 JSON keys, 2 properties
 - [`MobileChromeBridge`](#mobilechromebridge): 5 methods, 23 JSON keys, 1 property
@@ -317,6 +317,8 @@ Phase-4 (W3) sub-goal B: the native&lt;->Java facade for a *real interactive* cl
   Developer test hook: force `HeadlessLogin#isReconnecting()` true for a few seconds so the native "Reconnecting…" overlay + snapshot path can be exercised WITHOUT dropping the real game socket. Purely a UI/plumbing test — it does not touch the connection or the reconnect budget.
 - `drawSelection(Client c)` → `void`  
   Draw the selection feedback INTO the game frame (client thread, from `Hooks.draw` after the overlays composite, before the blit snapshot): a tight model outline on the just-selected entity for a beat. Tighter than a native polygon of the convex hull and it tracks the moving entity, since it's the engine's own model silhouette. (The walk destination tile is left to RuneLite's Tile Indicators plugin.)
+- `endHover()` → `void`  
+  Ending hover must not send MOUSE_EXITED through a click that is still settling or being consumed.
 - `getFrameHeight()` → `int`
 - `getFramePixels()` → `int[]`  
   The latest *complete* composited frame as packed `0x00RRGGBB` ints (a stable snapshot, not the live back buffer; the top byte is not alpha, and both native readers draw the frame opaque). Returns `null` before the first frame.
@@ -363,6 +365,8 @@ Phase-4 (W3) sub-goal B: the native&lt;->Java facade for a *real interactive* cl
   A discrete tap at `(x,y)` (gamepack-canvas pixels): the full focus-prime + move + press + release + click sequence — the proven `HeadlessLogin.synthesizeClick` shape. `button` is 1 (left tap: walk / interact / select a menu entry) or 3 (long-press: open the right-click menu).
 - `onClickPrecise(int shownX, int shownY, int button)` → `void`  
   A *precise* left/right click at exactly `(x,y)` — same proven move+click shape as `onClick`, but with **no snap-to-entity resolution**. This is for deliberate UI proxies (the native chrome tapping a tab stone / orb / widget), where the coordinate is already the exact target and touch-forgiveness must NOT redirect it: with a full-screen world viewport, snap would otherwise pull a tab-stone click onto a nearby world entity. Keeps the two-cycle move→click (so the engine re-targets the widget before the click) but feeds the literal point.
+- `onHover(int shownX, int shownY)` → `void`  
+  Passive hover only. Explicit menu tracking continues to use `onMove`.
 - `onKeyStroke(int vk)` → `void`  
   Press + release one non-text key by its AWT virtual-keycode (`KeyEvent.VK_*`) — backspace, enter, escape, tab, arrows, etc. Backspace/enter/tab also emit the matching `KEY_TYPED` control char (a gamepack text field deletes/submits on those). Posted from the hidden field's delete/return callbacks and any on-screen key.
 - `onKeybind(int keyCode, int modifiers)` → `void`  

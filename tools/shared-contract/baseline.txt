@@ -164,6 +164,7 @@ METHOD JavaBridge#canvasWidth() -> int
 METHOD JavaBridge#clearHover() -> void
 METHOD JavaBridge#devSimulateReconnect(int) -> void
 METHOD JavaBridge#drawSelection(Client) -> void
+METHOD JavaBridge#endHover() -> void
 METHOD JavaBridge#getFrameHeight() -> int
 METHOD JavaBridge#getFramePixels() -> int[]
 METHOD JavaBridge#getFrameSeq() -> int
@@ -188,6 +189,7 @@ METHOD JavaBridge#noteSceneDraw() -> void
 METHOD JavaBridge#onCameraDrag(int,int) -> void
 METHOD JavaBridge#onClick(int,int,int) -> void
 METHOD JavaBridge#onClickPrecise(int,int,int) -> void
+METHOD JavaBridge#onHover(int,int) -> void
 METHOD JavaBridge#onKeyStroke(int) -> void
 METHOD JavaBridge#onKeybind(int,int) -> void
 METHOD JavaBridge#onMiddleClick(int,int) -> void
