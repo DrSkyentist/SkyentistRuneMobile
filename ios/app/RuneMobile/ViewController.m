@@ -374,6 +374,9 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 // are translated into AWT KeyEvents. It never actually holds text (a zero-width sentinel keeps backspace
 // firing, and every change returns NO).
 @property (nonatomic, strong) UITextField *kbField;
+@property (nonatomic, strong) UILabel *kbTargetLabel;       // KB-1: "Typing to: Chat / Bank Search / Map Search…"
+@property (nonatomic, strong) UIBarButtonItem *kbSendItem;  // KB-1: Return action, titled for the destination
+@property (nonatomic, assign) int kbShownTarget;            // last target painted into the bar (-2 = never)
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) NSTimer *jitTimer;
 @property (nonatomic, strong) NSFileHandle *logFile;
@@ -620,6 +623,17 @@ static const NSTimeInterval kOutOfDateRecheckSeconds = 300.0; // the outofdate c
 @property (nonatomic, assign) BOOL mapPanning;          // the current pan gesture is panning the map
 @property (nonatomic, assign) CGFloat mapPanAccX;       // sub-px accumulators (screen pt -> whole canvas px)
 @property (nonatomic, assign) CGFloat mapPanAccY;
+// MAP-2: the map DISPLAY rect (snapshot "map", the zoomable tile area inside the window). A pinch whose centroid
+// is over the Key/dropdown/top bar would park the zoom wheel over a list and scroll it instead of zooming, so
+// map-open pinches aim the wheel here when the centroid isn't over the tiles. Zero = not yet published.
+@property (nonatomic, assign) CGRect mapDisplayCanvas;
+// MAP-3: a map-open drag that is not a pan or a list scroll (it began outside the window, or before its rect
+// was published). Swallowed until the lift: the map owns the screen, so it must not rotate the camera behind it
+// (Android parity: MainActivity onScroll "if (mapOpen) return true").
+@property (nonatomic, assign) BOOL mapDragSwallowed;
+@property (nonatomic, assign) CGFloat mapPinchRatio;     // MAP-1: geometric pinch accumulator (1 = no step yet)
+@property (nonatomic, weak) UIPinchGestureRecognizer *scenePinch;  // MAP-4: pan/pinch hand-off while map open
+@property (nonatomic, weak) UIPanGestureRecognizer *sceneCamPan;
 @property (nonatomic, assign) CGFloat cameraDragAccX; // sub-px accumulators (screen pt -> whole canvas px) for the 1-finger camera-rotate drag
 @property (nonatomic, assign) CGFloat cameraDragAccY;
 // Instant selected-highlight after a tap: the engine's tab GRAPHIC sprite (which the snapshot reads for the
@@ -2000,9 +2014,14 @@ static NSString *const kLayoutNoticeBody =
         [weakSelfForScene observeInputTouches:touches];
     };
     [self.screen addGestureRecognizer:camPan];
+    self.sceneCamPan = camPan;
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(onPinch:)];
     pinch.allowedTouchTypes = @[@(UITouchTypeDirect)]; // a Pencil plus a finger is not a two-finger zoom
+    // MAP-4: delegate only for shouldRecognizeSimultaneously (map-open pan -> pinch hand-off). shouldReceiveTouch
+    // short-circuits YES for the pinch, so its touch filtering is exactly what it was without a delegate.
+    pinch.delegate = self;
+    self.scenePinch = pinch;
     [self.screen addGestureRecognizer:pinch];
 
     // HOVER-1: Apple Pencil hovering over the iPad game canvas should behave like a desktop
@@ -2357,9 +2376,25 @@ static NSString *const kLayoutNoticeBody =
         [paste.heightAnchor constraintEqualToConstant:34],
     ]];
     UIBarButtonItem *pasteItem = [[UIBarButtonItem alloc] initWithCustomView:paste];
-    bar.items = @[ pasteItem, flex, send, hide ];
+    // KB-1: name where the keys are going (engine truth, JavaBridge.getTextInputTarget) between Paste and the
+    // actions, and let the Return action say what it does there. Still the same one Enter keystroke for every
+    // destination; only the words change. refreshKeyboardTarget keeps both current while the keyboard is up.
+    UILabel *target = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 220, 30)];
+    target.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    target.textColor = [UIColor whiteColor];
+    target.textAlignment = NSTextAlignmentCenter;
+    target.adjustsFontSizeToFitWidth = YES;
+    target.minimumScaleFactor = 0.7;
+    target.text = @"Typing to game";
+    self.kbTargetLabel = target;
+    self.kbSendItem = send;
+    UIBarButtonItem *targetItem = [[UIBarButtonItem alloc] initWithCustomView:target];
+    UIBarButtonItem *flex2 = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
+    bar.items = @[ pasteItem, flex, targetItem, flex2, send, hide ];
     [bar sizeToFit];
     self.kbField.inputAccessoryView = bar;
+    self.kbShownTarget = -2;
     [self.view addSubview:self.kbField];
 
     // (1) Debug panel — overlay ABOVE the game (so the launch button is tappable; the old bug was the
@@ -8024,9 +8059,11 @@ static CGRect mapRectFromArr(NSArray *a) {
             windowR = mapRectFromArr(d[@"window"]);
             self.mapKeyCanvas = mapRectFromArr(d[@"key"]);
             self.mapListCanvas = mapRectFromArr(d[@"maplist"]);
+            self.mapDisplayCanvas = mapRectFromArr(d[@"map"]);
         } else {
             self.mapKeyCanvas = CGRectZero;
             self.mapListCanvas = CGRectZero;
+            self.mapDisplayCanvas = CGRectZero;
         }
     }
     // FIX-14: the map search never flips INPUT_TYPE, so the soft keyboard would otherwise linger over the
@@ -8342,6 +8379,10 @@ static CGRect mapRectFromArr(NSArray *a) {
                 [self appendLine:@"[shell] game closed the text field -> keyboard down"];
             }
         }
+    }
+    // KB-1: keep the keyboard bar's destination label in step with the engine while the keyboard is up.
+    if (self.framesShown % 6 == 0 && [self.kbField isFirstResponder]) {
+        [self refreshKeyboardTarget];
     }
 
 
@@ -8936,12 +8977,24 @@ static CGRect mapRectFromArr(NSArray *a) {
 // (the enlarged chat tab buttons, the keyboard button, the side-tab grid). The control handles its own tap, so it
 // must not ALSO register as a walk-here click underneath. Touches on the bare game view (self.screen) pass through.
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    // MAP-4: the pinch only got a delegate for the simultaneity rule below; keep its touch intake unfiltered.
+    if (gr == self.scenePinch) return YES;
     // Pencil uses squeeze for its context menu. A slower tip tap remains a left click on lift;
     // fingers retain their existing long-press menu and drag thresholds.
     if (gr == self.sceneLongPress && touch.type == UITouchTypePencil) return NO;
     // The native dialogue parchment owns its own taps (continue / option rows) — keep world/camera gestures off it.
     if (self.dialogueView && !self.dialogueView.hidden && [touch.view isDescendantOfView:self.dialogueView]) return NO;
     return ![touch.view isKindOfClass:[UIControl class]];
+}
+
+// MAP-4: while the world map is open, a 1-finger map pan must not lock out a second finger's pinch. By default
+// the pan, once begun, blocks the pinch for the rest of the sequence, so "drag a little, then pinch" kept panning
+// and never zoomed. Allow the two together on the map only; onCameraPan drops its deltas while the pinch is live.
+// Off the map nothing changes (camera rotate and zoom stay mutually exclusive, as before).
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)a shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b {
+    if (!self.mapOpen) return NO;
+    BOOL pair = (a == self.scenePinch && b == self.sceneCamPan) || (a == self.sceneCamPan && b == self.scenePinch);
+    return pair;
 }
 
 // tap -> left click (walk / interact / select a menu entry).
@@ -10014,10 +10067,14 @@ static CGRect mapRectFromArr(NSArray *a) {
         [g setTranslation:CGPointZero inView:self.screen];
         // World map open: a 1-finger drag that BEGINS inside the Key list or the open surface dropdown
         // SCROLLS that list (wheel events parked over it); inside the map window it pans the MAP (bridge ->
-        // map centre). Outside the window it stays a camera drag, like the desktop.
+        // map centre). Anywhere else it is swallowed (MAP-3 below): the map owns the screen.
+        // MAP-3: classify by the LANDING point, not locationInView (already kSceneDragSlop past it): a swipe that
+        // started inside the Key list but crossed its edge before the pan began used to pan the map, and one that
+        // started on the map next to the list used to scroll it. Same rule Android uses (e1, the DOWN event).
+        self.mapDragSwallowed = NO;
         if (self.mapOpen) {
             int mgx = 0, mgy = 0;
-            if ([self mapPoint:[g locationInView:self.screen] toGameX:&mgx toGameY:&mgy]) {
+            if ([self mapPoint:landing toGameX:&mgx toGameY:&mgy]) {
                 CGPoint gp = CGPointMake(mgx, mgy);
                 if ((self.mapListCanvas.size.width > 0 && CGRectContainsPoint(self.mapListCanvas, gp))
                         || (self.mapKeyCanvas.size.width > 0 && CGRectContainsPoint(self.mapKeyCanvas, gp))) {
@@ -10041,6 +10098,15 @@ static CGRect mapRectFromArr(NSArray *a) {
                     return;
                 }
             }
+            // MAP-3: the map owns the screen while open. Anything else (landed outside the window, or in the
+            // letterbox) is swallowed until the lift: never a camera rotation, chat scroll or item drag behind it.
+            self.mapPanning = NO;
+            self.mapListScrolling = NO;
+            self.chatScrolling = NO;
+            self.mapDragSwallowed = YES;
+            [self.inputVisualizer setGestureKind:@"Map open: drag ignored"];
+            [self appendLine:@"[map] drag outside map window ignored"];
+            return;
         }
         self.mapPanning = NO;
         self.mapListScrolling = NO;
@@ -10056,9 +10122,11 @@ static CGRect mapRectFromArr(NSArray *a) {
         }
         // A drag that STARTS inside the open chat box scrolls the chat (finger-scroll) instead of rotating the
         // camera. Only when the chat is open (chatScrollable); otherwise it's a normal camera drag.
+        // Landing point, like every other branch here (DRAG-1): a swipe from near the chat's top edge must not
+        // be decided by where the finger was 18pt later.
         int gx = 0, gy = 0;
         if (self.chatScrollable && self.chatScrollCanvas.size.width > 0
-                && [self mapPoint:[g locationInView:self.screen] toGameX:&gx toGameY:&gy]
+                && [self mapPoint:landing toGameX:&gx toGameY:&gy]
                 && CGRectContainsPoint(self.chatScrollCanvas, CGPointMake(gx, gy))) {
             self.chatScrolling = YES;
             self.chatScrollAccum = 0;
@@ -10137,6 +10205,10 @@ static CGRect mapRectFromArr(NSArray *a) {
         return;
     }
     if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        if (self.mapDragSwallowed) {
+            self.mapDragSwallowed = NO;
+            return;
+        }
         if (self.paneSwiping) {
             self.paneSwiping = NO;
             return;
@@ -10171,7 +10243,13 @@ static CGRect mapRectFromArr(NSArray *a) {
         return;
     }
     if (g.state != UIGestureRecognizerStateChanged) return;
-    if (self.paneSwiping) {
+    if (self.paneSwiping || self.mapDragSwallowed) {
+        [g setTranslation:CGPointZero inView:self.screen];
+        return;
+    }
+    // MAP-4: a pinch joined this map pan (simultaneous only while the map is open). The pinch owns the gesture
+    // while it lives; keep zeroing the translation so the pan resumes without a jump if one finger stays down.
+    if ((self.mapPanning || self.mapListScrolling) && self.scenePinchActive) {
         [g setTranslation:CGPointZero inView:self.screen];
         return;
     }
@@ -10305,6 +10383,7 @@ static CGRect mapRectFromArr(NSArray *a) {
         [JVMLauncher postCancelArmedTap]; // two fingers zoom, they never tap
         self.pinchPrevScale = g.scale;
         self.wheelAccum = 0;
+        self.mapPinchRatio = 1.0;
         [JVMLauncher postClearHover];   // zoom moves the world too; don't leave a stale hover behind
         return;
     }
@@ -10317,6 +10396,10 @@ static CGRect mapRectFromArr(NSArray *a) {
         return;
     }
     if (g.state != UIGestureRecognizerStateChanged) return;
+    if (self.mapOpen) {
+        [self mapPinchChanged:g];
+        return;
+    }
     const CGFloat WHEEL_SENS = 12.0;   // notches per unit of scale change (tune by feel)
     CGFloat step = g.scale - self.pinchPrevScale;
     self.pinchPrevScale = g.scale;
@@ -10328,6 +10411,51 @@ static CGRect mapRectFromArr(NSArray *a) {
     if (![self mapPoint:[g locationInView:self.screen] toGameX:&gx toGameY:&gy]) { gx = 382; gy = 251; }
     [JVMLauncher postWheelX:gx y:gy rotation:notches];
     [self appendLine:[NSString stringWithFormat:@"[shell] pinch -> wheel rot=%d at %d,%d", notches, gx, gy]];
+}
+
+// MAP-1: world-map pinch. The engine exposes no zoom setter for the map (WorldMap has getWorldMapZoom only), so
+// this still speaks mouse wheel, but on the map's terms. Each wheel notch over the map is a whole zoom LEVEL, not
+// a camera nudge, and the camera's linear 12-notches-per-unit-scale mapping sent ~6 levels for a modest 1.5x
+// spread: the map slammed between extremes and overshot after the fingers stopped. Here:
+//   - geometric steps: one level per kMapPinchStep of RELATIVE scale, the same in both directions (Android's
+//     ScaleListener uses the same ratio model for the camera);
+//   - at most one level per Changed event, and the accumulator is clamped after a step so a fast pinch can't
+//     bank levels that keep firing once the fingers have stopped;
+//   - the wheel is parked over the map tiles. A centroid over the Key/dropdown would scroll that list, and one
+//     in the letterbox used to fall back to a fixed (382,251), which can land anywhere on a resized canvas.
+- (void)mapPinchChanged:(UIPinchGestureRecognizer *)g {
+    const CGFloat kMapPinchStep = 1.30;   // relative spread per map zoom level (tune on device)
+    CGFloat prev = self.pinchPrevScale > 0 ? self.pinchPrevScale : 1.0;
+    CGFloat now = g.scale > 0 ? g.scale : prev;
+    self.pinchPrevScale = now;
+    CGFloat r = (self.mapPinchRatio > 0 ? self.mapPinchRatio : 1.0) * (now / prev);
+    int rotation = 0;
+    if (r >= kMapPinchStep) rotation = -1;            // fingers spreading = zoom in = wheel up
+    else if (r <= 1.0 / kMapPinchStep) rotation = 1;  // pinching in = zoom out
+    if (rotation == 0) {
+        self.mapPinchRatio = r;
+        return;
+    }
+    self.mapPinchRatio = 1.0; // drop any surplus: one level per crossing, no banked overshoot
+    int gx = 0, gy = 0;
+    BOOL mapped = [self mapPoint:[g locationInView:self.screen] toGameX:&gx toGameY:&gy];
+    CGPoint gp = CGPointMake(gx, gy);
+    CGRect tiles = self.mapDisplayCanvas;
+    BOOL haveTiles = tiles.size.width > 0 && tiles.size.height > 0;
+    BOOL overList = (self.mapKeyCanvas.size.width > 0 && CGRectContainsPoint(self.mapKeyCanvas, gp))
+                 || (self.mapListCanvas.size.width > 0 && CGRectContainsPoint(self.mapListCanvas, gp));
+    if (!mapped || overList || (haveTiles && !CGRectContainsPoint(tiles, gp))) {
+        CGRect aim = haveTiles ? tiles : self.mapWindowCanvas;
+        if (aim.size.width <= 0) {
+            [self appendLine:@"[map] pinch step dropped (no map rect yet)"];
+            return;
+        }
+        gx = (int)lround(CGRectGetMidX(aim));
+        gy = (int)lround(CGRectGetMidY(aim));
+    }
+    [JVMLauncher postWheelX:gx y:gy rotation:rotation];
+    [self appendLine:[NSString stringWithFormat:@"[map] pinch -> zoom %@ (wheel %d) at %d,%d",
+                                                rotation < 0 ? @"in" : @"out", rotation, gx, gy]];
 }
 
 #pragma mark - Keyboard -> KeyEvent bridge (Phase 5)
@@ -10826,6 +10954,45 @@ static CGRect mapRectFromArr(NSArray *a) {
         [self appendLine:@"[shell] key backspace"];
     }
     return NO;   // keep the field at the sentinel — we only capture, never store
+}
+
+// KB-1: paint the keyboard bar for where keys are going. The destination comes from the engine
+// (JavaBridge.getTextInputTarget: message-layer mode, world-map search flag, focused input widget, login form),
+// so "Bank Search" means the bank's search prompt is the live input, not merely that a bank is open. -1 (older
+// jar) and 0 keep the neutral wording. Only the bar's words change; every action sends what it always sent.
+- (void)refreshKeyboardTarget {
+    int t = [JVMLauncher textInputTarget];
+    if (t == self.kbShownTarget || !self.kbTargetLabel) return;
+    self.kbShownTarget = t;
+    NSString *label, *action;
+    UIColor *tint;
+    switch (t) {
+        case 1: label = @"Typing to: Chat";            action = @"Send ⏎";   tint = [UIColor colorWithRed:0.55 green:0.85 blue:1.0 alpha:1]; break;
+        case 2: label = @"Typing to: Bank Search";     action = @"Done ⏎";   tint = [UIColor colorWithRed:1.0 green:0.82 blue:0.35 alpha:1]; break;
+        case 3: label = @"Typing to: Map Search";      action = @"Search ⏎"; tint = [UIColor colorWithRed:0.6 green:0.95 blue:0.6 alpha:1]; break;
+        case 4: label = @"Typing to: Item Search";     action = @"Enter ⏎";  tint = [UIColor colorWithRed:1.0 green:0.82 blue:0.35 alpha:1]; break;
+        case 5: label = @"Typing to: Amount";          action = @"Enter ⏎";  tint = [UIColor whiteColor]; break;
+        case 6: label = @"Typing to: Private Message"; action = @"Send ⏎";   tint = [UIColor colorWithRed:0.0 green:1.0 blue:1.0 alpha:1]; break;
+        case 7: label = @"Typing to: Login";           action = @"Enter ⏎";  tint = [UIColor whiteColor]; break;
+        case 8: label = @"Typing to: Game Prompt";     action = @"Enter ⏎";  tint = [UIColor whiteColor]; break;
+        default: label = @"Typing to game";            action = @"Enter ⏎";  tint = [UIColor whiteColor]; break;
+    }
+    self.kbTargetLabel.text = label;
+    self.kbTargetLabel.textColor = tint;
+    self.kbTargetLabel.accessibilityLabel = label;
+    self.kbSendItem.title = action;
+    // Same Return key as the bar button, so its legend tracks it. A text-keyboard-only property: the number pad
+    // has no Return key (the bar's action is how an amount is entered there).
+    UIReturnKeyType rk = t == 1 || t == 6 ? UIReturnKeySend : (t == 3 || t == 4 ? UIReturnKeySearch : (t == 2 ? UIReturnKeyDone : UIReturnKeyDefault));
+    if (self.kbField.returnKeyType != rk) {
+        self.kbField.returnKeyType = rk;
+        if ([self.kbField isFirstResponder]) [self.kbField reloadInputViews];
+    }
+    [self appendLine:[NSString stringWithFormat:@"[shell] keyboard target -> %d (%@)", t, label]];
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)tf {
+    if (tf == self.kbField) [self refreshKeyboardTarget];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)tf {

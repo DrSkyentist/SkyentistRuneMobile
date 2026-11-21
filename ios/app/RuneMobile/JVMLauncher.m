@@ -51,6 +51,7 @@ static jmethodID gMidW = NULL, gMidH = NULL, gMidSeq = NULL, gMidPixels = NULL;
 static jmethodID gMidGpuSeq = NULL;       // getGpuFrameSeq()I - base-GPU present proof (optional; older jars lack it)
 static jmethodID gMidInteractSeq = NULL;  // getInteractTapSeq()I — native haptic cue (optional; tolerate older jar)
 static jmethodID gMidInputKind = NULL;    // getTextInputKind()I — number pad vs text keyboard (optional)
+static jmethodID gMidInputTarget = NULL;  // getTextInputTarget()I — where typed keys land, for the keyboard label (optional)
 static jmethodID gMidLastTapKind = NULL;  // getLastTapKind()I — TAP_KIND_NONE/WALK/SCENE/WIDGET (optional)
 static jmethodID gMidHeapStats = NULL;    // heapStats()Ljava/lang/String; — dev diagnostics (optional)
 static jmethodID gMidSimReconnect = NULL; // devSimulateReconnect(I)V — dev "test reconnect" hook (optional)
@@ -322,6 +323,11 @@ static BOOL ensureBridge(void) {
     if ((*env)->ExceptionCheck(env)) {
         (*env)->ExceptionClear(env);
         gMidInputKind = NULL;
+    }
+    gMidInputTarget = (*env)->GetStaticMethodID(env, global, "getTextInputTarget", "()I");
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        gMidInputTarget = NULL; // older jar: the keyboard bar just shows its generic label
     }
     gMidLastTapKind = (*env)->GetStaticMethodID(env, global, "getLastTapKind", "()I");
     if ((*env)->ExceptionCheck(env)) {
@@ -3636,6 +3642,18 @@ static BOOL pipFeedMarkerSaysMain(void) {
     if ((*env)->ExceptionCheck(env)) {
         bridgeNoteClear(env, "JVMLauncher.textInputKind");
         return 0;
+    }
+    return (int)r;
+}
+
++ (int)textInputTarget {
+    if (!ensureBridge() || !gMidInputTarget)
+        return -1;
+    JNIEnv *env = gMainEnv;
+    jint r = (*env)->CallStaticIntMethod(env, gBridgeClass, gMidInputTarget);
+    if ((*env)->ExceptionCheck(env)) {
+        bridgeNoteClear(env, "JVMLauncher.textInputTarget");
+        return -1;
     }
     return (int)r;
 }

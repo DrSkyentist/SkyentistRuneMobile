@@ -118,6 +118,120 @@ public class JavaBridgeTextInputTest
 		assertEquals(NONE, JavaBridge.getTextInputKind());
 	}
 
+	// ---- KB-1: the destination label (getTextInputTarget). Engine state names the target; an open window alone never does.
+
+	private static int target(int inputType, int focusedGroup, boolean login, boolean loggedIn, boolean mapSearching, boolean bankOpen)
+	{
+		return JavaBridge.classifyTextTarget(inputType, focusedGroup, login, loggedIn, mapSearching, bankOpen);
+	}
+
+	@Test
+	public void noPromptWhileLoggedInIsChat()
+	{
+		assertEquals(JavaBridge.TEXT_TARGET_CHAT, target(0, -1, false, true, false, false));
+	}
+
+	@Test
+	public void anOpenBankWithoutItsSearchPromptIsStillChat()
+	{
+		// The handoff's caution: the bank being open must not by itself relabel the keyboard "Bank Search".
+		assertEquals(JavaBridge.TEXT_TARGET_CHAT, target(0, -1, false, true, false, true));
+	}
+
+	@Test
+	public void searchPromptIsBankSearchOnlyWithTheBankOpen()
+	{
+		assertEquals(JavaBridge.TEXT_TARGET_BANK_SEARCH, target(11, -1, false, true, false, true));
+		assertEquals(JavaBridge.TEXT_TARGET_SEARCH, target(11, -1, false, true, false, false));
+	}
+
+	@Test
+	public void mapSearchHasNoMessageLayerModeButIsNamed()
+	{
+		assertEquals(JavaBridge.TEXT_TARGET_MAP_SEARCH, target(0, -1, false, true, true, false));
+		// A live message-layer prompt still outranks the map flag: keys go to the prompt.
+		assertEquals(JavaBridge.TEXT_TARGET_AMOUNT, target(7, -1, false, true, true, false));
+	}
+
+	@Test
+	public void amountsPrivateMessagesAndOtherPrompts()
+	{
+		for (int t : new int[]{7, 16, 19, 30})
+		{
+			assertEquals("INPUT_TYPE " + t, JavaBridge.TEXT_TARGET_AMOUNT, target(t, -1, false, true, false, true));
+		}
+		assertEquals(JavaBridge.TEXT_TARGET_PRIVATE_MESSAGE, target(6, -1, false, true, false, false));
+		for (int t : new int[]{8, 14, -2, -3})
+		{
+			assertEquals("INPUT_TYPE " + t, JavaBridge.TEXT_TARGET_PROMPT, target(t, -1, false, true, false, false));
+		}
+		assertEquals(JavaBridge.TEXT_TARGET_AMOUNT, target(0, InterfaceID.GE_OFFERS, false, true, false, false));
+		assertEquals(JavaBridge.TEXT_TARGET_PROMPT, target(0, InterfaceID.CHATBOX, false, true, false, false));
+	}
+
+	@Test
+	public void loginFormAndLoggedOut()
+	{
+		assertEquals(JavaBridge.TEXT_TARGET_LOGIN, target(0, -1, true, false, false, false));
+		assertEquals(JavaBridge.TEXT_TARGET_NONE, target(0, -1, false, false, false, false));
+	}
+
+	@Test
+	public void kindStaysConsistentWithTarget()
+	{
+		// The target is labelling only; the keyboard kind (and so the auto-raise) is unchanged by it. Every
+		// non-NONE kind must map to a non-NONE target for the same inputs (logged in).
+		for (int t : new int[]{0, 6, 7, 8, 11, 14, 16, 19, 30, -2, -3})
+		{
+			final int kind = JavaBridge.classifyTextInput(t, -1, false);
+			final int tgt = target(t, -1, false, true, false, false);
+			if (kind != NONE)
+			{
+				assertTrue("INPUT_TYPE " + t, tgt != JavaBridge.TEXT_TARGET_NONE && tgt != JavaBridge.TEXT_TARGET_CHAT);
+			}
+		}
+	}
+
+	@Test
+	public void snapshotPublishesBankSearchAndMapSearchFromEngineState() throws Exception
+	{
+		final Client c = mock(Client.class);
+		when(c.getGameState()).thenReturn(GameState.LOGGED_IN);
+		final Widget shown = mock(Widget.class);
+		when(shown.isHidden()).thenReturn(false);
+
+		// Bank open, no prompt: chat.
+		when(c.getWidget(InterfaceID.Bankmain.ITEMS)).thenReturn(shown);
+		when(c.getVarcIntValue(VarClientInt.INPUT_TYPE)).thenReturn(0);
+		snapshot(c);
+		assertEquals(JavaBridge.TEXT_TARGET_CHAT, JavaBridge.getTextInputTarget());
+
+		// The bank's search prompt opens.
+		when(c.getVarcIntValue(VarClientInt.INPUT_TYPE)).thenReturn(11);
+		snapshot(c);
+		assertEquals(JavaBridge.TEXT_TARGET_BANK_SEARCH, JavaBridge.getTextInputTarget());
+		assertEquals(TEXT, JavaBridge.getTextInputKind());
+
+		// Search closed, bank closed: back to chat, no stale "Bank Search".
+		when(c.getVarcIntValue(VarClientInt.INPUT_TYPE)).thenReturn(0);
+		when(c.getWidget(InterfaceID.Bankmain.ITEMS)).thenReturn(null);
+		snapshot(c);
+		assertEquals(JavaBridge.TEXT_TARGET_CHAT, JavaBridge.getTextInputTarget());
+
+		// World map open and searching (no MESLAYERMODE): map search. Kind/open state are untouched by it.
+		when(c.getWidget(InterfaceID.Worldmap.MAP_CONTAINER)).thenReturn(shown);
+		when(c.getVarcIntValue(net.runelite.api.gameval.VarClientID.WORLDMAP_SEARCHING)).thenReturn(1);
+		snapshot(c);
+		assertEquals(JavaBridge.TEXT_TARGET_MAP_SEARCH, JavaBridge.getTextInputTarget());
+		assertFalse(JavaBridge.isTextInputOpen());
+		assertEquals(NONE, JavaBridge.getTextInputKind());
+
+		// A stale search flag with the map closed is not a map search.
+		when(c.getWidget(InterfaceID.Worldmap.MAP_CONTAINER)).thenReturn(null);
+		snapshot(c);
+		assertEquals(JavaBridge.TEXT_TARGET_CHAT, JavaBridge.getTextInputTarget());
+	}
+
 	private static void snapshot(Client c) throws Exception
 	{
 		final Method m = JavaBridge.class.getDeclaredMethod("snapshotTextInputOpen", Client.class);

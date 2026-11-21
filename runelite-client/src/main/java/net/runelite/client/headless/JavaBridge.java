@@ -413,6 +413,19 @@ public final class JavaBridge
 	// INPUT_TYPE values whose chatbox prompt takes a number (the "Enter amount" prompts). Every other non-zero
 	// INPUT_TYPE is free text.
 	private static final int[] NUMERIC_INPUT_TYPES = {7, 16, 19, 30};
+	// Where typed keys will land (TEXT_TARGET_*), snapshotted with textInputKind on the client thread. The shells
+	// LABEL their keyboard with it; it never routes anything. Keys still go to the canvas exactly as before, and
+	// the engine decides what consumes them; this only reports what the engine's own state says that is.
+	private static volatile int textInputTarget;
+	static final int TEXT_TARGET_NONE = 0;          // logged out, no credential field: nothing to type into
+	static final int TEXT_TARGET_CHAT = 1;          // no prompt open: keys go to the chatbox input line
+	static final int TEXT_TARGET_BANK_SEARCH = 2;   // the SEARCH message-layer prompt while the bank is open
+	static final int TEXT_TARGET_MAP_SEARCH = 3;    // the world map's search (WORLDMAP_SEARCHING), no MESLAYERMODE
+	static final int TEXT_TARGET_SEARCH = 4;        // the SEARCH prompt elsewhere (e.g. Grand Exchange item search)
+	static final int TEXT_TARGET_AMOUNT = 5;        // an "Enter amount" prompt or the GE quantity/price field
+	static final int TEXT_TARGET_PRIVATE_MESSAGE = 6;
+	static final int TEXT_TARGET_LOGIN = 7;         // the login screen's credential/authenticator form
+	static final int TEXT_TARGET_PROMPT = 8;        // any other engine or RuneLite text prompt
 
 	// Key timing. iOS hands us committed TEXT -- a UITextField change callback -- and never a key down or up,
 	// so there is no dwell and no cadence of the user's to report. What we CAN stop doing is reporting one
@@ -2698,6 +2711,74 @@ public final class JavaBridge
 		return loginField ? TEXT_INPUT_TEXT : TEXT_INPUT_NONE;
 	}
 
+	/**
+	 * Where typed keys are going right now, as one of the {@code TEXT_TARGET_*} codes: {@code 1} chat, {@code 2}
+	 * bank search, {@code 3} world-map search, {@code 4} another search prompt, {@code 5} an amount, {@code 6} a
+	 * private message, {@code 7} the login form, {@code 8} another prompt, {@code 0} nothing. Read from engine
+	 * state on the client thread (the message-layer mode, the world-map search flag, the focused input widget,
+	 * the login form), never inferred from which window happens to be open. For labelling only.
+	 */
+	public static int getTextInputTarget()
+	{
+		return ENABLED ? textInputTarget : TEXT_TARGET_NONE;
+	}
+
+	/**
+	 * The text destination for one snapshot. {@code inputType} is MESLAYERMODE; {@code mapSearching} is the world
+	 * map's search flag (only honoured while the map is open); {@code bankOpen} is the bank item grid being shown.
+	 * A bank search IS the SEARCH message-layer prompt, so the bank only names that prompt; it never makes one.
+	 */
+	static int classifyTextTarget(int inputType, int focusedGroup, boolean loginField, boolean loggedIn,
+		boolean mapSearching, boolean bankOpen)
+	{
+		if (inputType != 0)
+		{
+			for (int t : NUMERIC_INPUT_TYPES)
+			{
+				if (t == inputType)
+				{
+					return TEXT_TARGET_AMOUNT;
+				}
+			}
+			if (inputType == net.runelite.api.vars.InputType.SEARCH.getType())
+			{
+				return bankOpen ? TEXT_TARGET_BANK_SEARCH : TEXT_TARGET_SEARCH;
+			}
+			if (inputType == net.runelite.api.vars.InputType.PRIVATE_MESSAGE.getType())
+			{
+				return TEXT_TARGET_PRIVATE_MESSAGE;
+			}
+			return TEXT_TARGET_PROMPT;
+		}
+		if (mapSearching)
+		{
+			return TEXT_TARGET_MAP_SEARCH;
+		}
+		if (focusedGroup >= 0)
+		{
+			return focusedGroup == InterfaceID.GE_OFFERS ? TEXT_TARGET_AMOUNT : TEXT_TARGET_PROMPT;
+		}
+		if (loginField)
+		{
+			return TEXT_TARGET_LOGIN;
+		}
+		return loggedIn ? TEXT_TARGET_CHAT : TEXT_TARGET_NONE;
+	}
+
+	private static boolean widgetVisible(Client c, int widgetId)
+	{
+		try
+		{
+			final Widget w = c.getWidget(widgetId);
+			return w != null && !w.isHidden();
+		}
+		catch (RuntimeException ignore)
+		{
+			BridgeFaults.note("JavaBridge.widgetVisible", ignore);
+			return false;
+		}
+	}
+
 	/** Snapshot INPUT_TYPE on the client thread (from tapTick) so isTextInputOpen() never reads the live varc off-thread. */
 	private static void snapshotTextInputOpen(Client c)
 	{
@@ -2751,6 +2832,26 @@ public final class JavaBridge
 			}
 			textInputKind = classifyTextInput(inputType, focusedGroup, loginField);
 			textInputOpen = want;
+			// Labelling only: textInputOpen/textInputKind above are unchanged, so the auto-raise and the
+			// keyboard type behave exactly as before on both shells.
+			boolean loggedIn = false;
+			boolean mapSearching = false;
+			boolean bankOpen = false;
+			try
+			{
+				loggedIn = c.getGameState() == GameState.LOGGED_IN;
+				if (loggedIn)
+				{
+					mapSearching = widgetVisible(c, InterfaceID.Worldmap.MAP_CONTAINER)
+						&& c.getVarcIntValue(net.runelite.api.gameval.VarClientID.WORLDMAP_SEARCHING) == 1;
+					bankOpen = inputType != 0 && widgetVisible(c, InterfaceID.Bankmain.ITEMS);
+				}
+			}
+			catch (RuntimeException ignore)
+			{
+				BridgeFaults.note("JavaBridge.snapshotTextInputOpen.target", ignore);
+			}
+			textInputTarget = classifyTextTarget(inputType, focusedGroup, loginField, loggedIn, mapSearching, bankOpen);
 		}
 		catch (RuntimeException ex)
 		{

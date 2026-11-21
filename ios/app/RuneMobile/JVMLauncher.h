@@ -327,6 +327,11 @@ typedef NS_ENUM(NSInteger, RMJitScriptCheck) {
 /// Non-zero exactly when textInputOpen is YES. Call on the main thread.
 + (int)textInputKind;
 
+/// Where typed keys land right now (JavaBridge TEXT_TARGET_*): 0 nothing, 1 chat, 2 bank search, 3 world-map
+/// search, 4 other search, 5 amount, 6 private message, 7 login form, 8 other prompt. -1 when the bundled jar
+/// predates the method. For labelling the keyboard only; it routes nothing. Call on the main thread.
++ (int)textInputTarget;
+
 /// Direct-present reveal gate: YES once the world geometry is uploaded (the GPU layer can be revealed over the
 /// CPU loading-screen blit without a sky flash). YES if the bridge isn't available.
 + (BOOL)sceneWarmedUp;

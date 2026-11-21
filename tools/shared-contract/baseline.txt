@@ -178,6 +178,7 @@ METHOD JavaBridge#getReorderPaneBounds() -> int[]
 METHOD JavaBridge#getScrollableRects() -> int[]
 METHOD JavaBridge#getTapKindSeq() -> int
 METHOD JavaBridge#getTextInputKind() -> int
+METHOD JavaBridge#getTextInputTarget() -> int
 METHOD JavaBridge#gpuFrameBackBuffer(int,int) -> int[]
 METHOD JavaBridge#gpuPublish(int,int) -> void
 METHOD JavaBridge#heapStats() -> String

@@ -13,7 +13,7 @@ how the bridge works, which thread each call runs on, and how to change it safel
 
 | Classes | Methods | JSON keys | System properties |
 |---:|---:|---:|---:|
-| 23 | 257 | 283 | 84 |
+| 23 | 258 | 283 | 84 |
 
 ## Classes
 
@@ -27,7 +27,7 @@ how the bridge works, which thread each call runs on, and how to change it safel
 - [`HudDataBridge`](#huddatabridge): 4 methods, 27 JSON keys, 2 properties
 - [`HudVeneerBridge`](#hudveneerbridge): 39 methods, 77 JSON keys, 10 properties
 - [`InfoBoxBridge`](#infoboxbridge): 6 methods, 9 JSON keys
-- [`JavaBridge`](#javabridge): 57 methods, 14 properties
+- [`JavaBridge`](#javabridge): 58 methods, 14 properties
 - [`LootTrackerBridge`](#loottrackerbridge): 6 methods, 14 JSON keys
 - [`MenuPeekBridge`](#menupeekbridge): 5 methods, 23 JSON keys, 2 properties
 - [`MobileChromeBridge`](#mobilechromebridge): 5 methods, 23 JSON keys, 1 property
@@ -344,6 +344,8 @@ Phase-4 (W3) sub-goal B: the native&lt;->Java facade for a *real interactive* cl
   Native: bumps once per resolved left tap (pair with `getLastTapKind`).
 - `getTextInputKind()` → `int`  
   What kind of keyboard the open game field wants: `0` none, `1` text, `2` a number (an "Enter amount" prompt or the Grand Exchange quantity/price entry). Non-zero exactly when `isTextInputOpen()` is true. The shells show a number pad for `2`.
+- `getTextInputTarget()` → `int`  
+  Where typed keys are going right now, as one of the `TEXT_TARGET_*` codes: `1` chat, `2` bank search, `3` world-map search, `4` another search prompt, `5` an amount, `6` a private message, `7` the login form, `8` another prompt, `0` nothing. Read from engine state on the client thread (the message-layer mode, the world-map search flag, the focused input widget, the login form), never inferred from which window happens to be open. For labelling only.
 - `gpuFrameBackBuffer(int w, int h)` → `int[]`  
   The next back buffer (w*h ints), allocated/resized as needed, for the native shim to write into.
 - `gpuPublish(int w, int h)` → `void`  
