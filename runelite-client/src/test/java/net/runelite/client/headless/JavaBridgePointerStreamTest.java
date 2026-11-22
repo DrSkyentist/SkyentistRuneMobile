@@ -43,11 +43,14 @@ import net.runelite.api.Menu;
 import net.runelite.api.MenuAction;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.Point;
+import net.runelite.api.widgets.Widget;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.client.callback.ClientThread;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertNull;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -55,6 +58,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 
 /**
  * Where the bridge says the pointer is — the other half of the press-timing contract that
@@ -451,6 +456,103 @@ public class JavaBridgePointerStreamTest
 		later.remove().run();
 		pump();
 		assertTrue("cleanup must not exit a newer tap's pointer", cap.all().isEmpty());
+	}
+
+	@Test
+	public void quizSelectIsTheOnlyDirectWidgetAction()
+	{
+		final MenuEntry cancel = cancelEntry();
+		final MenuEntry select = quizSelectEntry();
+		assertSame(select, JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{cancel, select}));
+		assertSame(select, JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{select, cancel}));
+		assertNull(JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{select}));
+		assertNull(JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{cancel, select, walkEntry()}));
+		assertNull(JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{cancel, walkEntry()}));
+		final MenuEntry plugin = quizSelectEntry();
+		when(plugin.onClick()).thenReturn(e -> {});
+		assertNull("RuneLite plugin callbacks must remain on the ordinary engine path",
+			JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{cancel, plugin}));
+		final MenuEntry menuChanged = quizSelectEntry();
+		when(menuChanged.getOption()).thenReturn("Choose");
+		assertNull(JavaBridge.soleSelectWidgetEntry(new MenuEntry[]{cancel, menuChanged}));
+	}
+
+	@Test
+	public void armedQuizTapSelectsExactlyOnceWithoutRightClick() throws Exception
+	{
+		final Menu menu = client.getMenu();
+		when(menu.getMenuEntries()).thenReturn(new MenuEntry[]{cancelEntry(), quizSelectEntry()});
+		JavaBridge.armTap(TAP_X, TAP_Y);
+		pump();
+		settleUntilArmed();
+		verify(client, never()).menuAction(
+			org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt(),
+			any(MenuAction.class), org.mockito.ArgumentMatchers.anyInt(),
+			org.mockito.ArgumentMatchers.anyInt(), any(String.class), any(String.class));
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		verify(client).menuAction(-1, 123456, MenuAction.CC_OP, 1, -1, "Select", "");
+		assertEquals("one selected widget action, no synthetic left or right press", 0,
+			cap.count(MouseEvent.MOUSE_PRESSED));
+		JavaBridge.tapTick(client);
+		pump();
+		verify(client).menuAction(-1, 123456, MenuAction.CC_OP, 1, -1, "Select", "");
+	}
+
+	@Test
+	public void fastQuizTapSelectsOnceAfterThePointerResolves() throws Exception
+	{
+		when(client.getMenu().getMenuEntries()).thenReturn(new MenuEntry[]{cancelEntry(), quizSelectEntry()});
+		JavaBridge.armTap(TAP_X, TAP_Y);
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		pump();
+		assertEquals(0, cap.count(MouseEvent.MOUSE_PRESSED));
+		for (int i = 0; i < 30; i++)
+		{
+			JavaBridge.tapTick(client);
+			pump();
+		}
+		verify(client).menuAction(-1, 123456, MenuAction.CC_OP, 1, -1, "Select", "");
+		assertEquals(0, cap.count(MouseEvent.MOUSE_PRESSED));
+	}
+
+	@Test
+	public void multiActionWidgetRetainsNormalClick() throws Exception
+	{
+		when(client.getMenu().getMenuEntries()).thenReturn(
+			new MenuEntry[]{cancelEntry(), quizSelectEntry(), walkEntry()});
+		JavaBridge.onClick(TAP_X, TAP_Y, MouseEvent.BUTTON1);
+		settleUntilClicked();
+		assertEquals("other menus must still get their ordinary synthetic tap", 1,
+			cap.count(MouseEvent.MOUSE_PRESSED));
+		verify(client, never()).menuAction(
+			org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt(),
+			any(MenuAction.class), org.mockito.ArgumentMatchers.anyInt(),
+			org.mockito.ArgumentMatchers.anyInt(), any(String.class), any(String.class));
+	}
+
+	private static MenuEntry cancelEntry()
+	{
+		final MenuEntry cancel = mock(MenuEntry.class);
+		when(cancel.getOption()).thenReturn("Cancel");
+		when(cancel.getType()).thenReturn(MenuAction.CANCEL);
+		return cancel;
+	}
+
+	private static MenuEntry quizSelectEntry()
+	{
+		final MenuEntry select = mock(MenuEntry.class);
+		when(select.getOption()).thenReturn("Select");
+		when(select.getTarget()).thenReturn("");
+		when(select.getType()).thenReturn(MenuAction.CC_OP);
+		when(select.getParam0()).thenReturn(-1);
+		when(select.getParam1()).thenReturn(123456);
+		when(select.getIdentifier()).thenReturn(1);
+		when(select.getItemId()).thenReturn(-1);
+		final Widget widget = mock(Widget.class);
+		when(widget.getItemId()).thenReturn(-1);
+		when(select.getWidget()).thenReturn(widget);
+		return select;
 	}
 
 	private Queue<Runnable> deferClientTicks()
