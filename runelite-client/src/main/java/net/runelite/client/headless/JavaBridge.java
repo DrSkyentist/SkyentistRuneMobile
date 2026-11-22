@@ -1064,6 +1064,82 @@ public final class JavaBridge
 	}
 
 	/**
+	 * A few engine-owned interface buttons (the Quiz Master's Odd One Out answers are a
+	 * reproducible example) expose exactly "Select" and "Cancel" when right-clicked,
+	 * yet a synthesized left click can fail to dispatch Select. The pointer is already
+	 * resolved by the ordinary tap gate. For ONLY this unambiguous widget menu, use the
+	 * same CC_OP action the engine's right-click choice would dispatch.
+	 *
+	 * Do not change world clicks, plugin callbacks, menu swaps, or menus with more than
+	 * one actionable entry. A stale/unfinished cursor gate must never call this method.
+	 */
+	static MenuEntry soleSelectWidgetEntry(MenuEntry[] entries)
+	{
+		if (entries == null || entries.length != 2)
+		{
+			return null;
+		}
+		MenuEntry select = null;
+		int cancels = 0;
+		for (MenuEntry e : entries)
+		{
+			if (e == null || e.getType() == null)
+			{
+				return null;
+			}
+			if (e.getType() == MenuAction.CANCEL)
+			{
+				cancels++;
+				continue;
+			}
+			if (select != null
+				|| !"Select".equalsIgnoreCase(e.getOption())
+				|| (e.getType() != MenuAction.CC_OP && e.getType() != MenuAction.CC_OP_LOW_PRIORITY)
+				|| e.getWidget() == null
+				|| e.onClick() != null)
+			{
+				return null;
+			}
+			select = e;
+		}
+		return cancels == 1 ? select : null;
+	}
+
+	/** Dispatch a single resolved engine widget Select exactly once, without another AWT click. */
+	private static boolean dispatchSoleWidgetSelect(Client c)
+	{
+		if (c.isMenuOpen())
+		{
+			return false;
+		}
+		try
+		{
+			final MenuEntry entry = soleSelectWidgetEntry(c.getMenu().getMenuEntries());
+			if (entry == null)
+			{
+				return false;
+			}
+			c.menuAction(entry.getParam0(), entry.getParam1(), entry.getType(),
+				entry.getIdentifier(), entry.getItemId(), entry.getOption(), entry.getTarget());
+			publishTapKind(TAP_KIND_WIDGET, entry);
+			armWidgetOutline(entry);
+			interactTapSeq++;
+			if (TOUCH_DIAG)
+			{
+				log.info("[touchdiag] direct single Select widget id={} param0={} type={}",
+					entry.getParam1(), entry.getParam0(), entry.getType());
+			}
+			finishTap();
+			return true;
+		}
+		catch (RuntimeException ex)
+		{
+			BridgeFaults.note("JavaBridge.dispatchSoleWidgetSelect", ex);
+			return false; // retain the existing left-click path on any bridge error
+		}
+	}
+
+	/**
 	 * In-game left-tap ingress (client thread). Always targets the LITERAL tap point — no centroid/snap
 	 * redirection; the engine's own pick (model silhouette + built-in slop) decides what the tap hit.
 	 * With the engine menu open the tap selects the row under it directly (the engine consumes it against
@@ -1162,6 +1238,10 @@ public final class JavaBridge
 			return false;
 		}
 		tapUncommitted = false;
+		if (dispatchSoleWidgetSelect(c))
+		{
+			return true;
+		}
 		clickFp = fp;
 		clickedFrames = 0;
 		// CLICKED before the press goes out: the engine acts on the press within a tick, and the truth event it
@@ -1306,6 +1386,10 @@ public final class JavaBridge
 						tapUncommitted = false;
 						tapState = TapState.IDLE;
 					}
+					return;
+				}
+				if (stableFrames >= STABLE_NEEDED && dispatchSoleWidgetSelect(c))
+				{
 					return;
 				}
 				clickFp = fp;
