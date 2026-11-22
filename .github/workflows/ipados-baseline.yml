@@ -1,8 +1,8 @@
-name: SkyRune Map and Text Input
+name: SkyRune Quiz Master Single-Select
 
 on:
   push:
-    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer, fix/pencil-input-ownership, fix/map-and-text-input]
+    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer, fix/pencil-input-ownership, fix/map-and-text-input, fix/quizmaster-single-select]
   workflow_dispatch:
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-Map-Text-Input-Test-Results
+          name: SkyRune-QuizMaster-Test-Results
           path: runelite-client/build/test-results/test/*.xml
           if-no-files-found: warn
           retention-days: 14
@@ -76,7 +76,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-Map-Text-Input-IPA
+          name: SkyRune-QuizMaster-IPA
           path: dist/ci/*.ipa
           if-no-files-found: error
           retention-days: 14
