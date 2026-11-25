@@ -1,8 +1,8 @@
-name: SkyRune Map and Text Input
+name: SkyRune Revision 243 Recovery
 
 on:
   push:
-    branches: [experiment/apple-pencil-squeeze, integration/skyrune-0.10.2-pencil, feature/input-visualizer, fix/pencil-input-ownership, fix/map-and-text-input]
+    branches: [fix/skyrune-rev243]
   workflow_dispatch:
 
 permissions:
@@ -21,6 +21,27 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Merge pinned RuneLite revision 243 in isolated checkout
+        run: |
+          set -euo pipefail
+          upstream=9af7b54deaac35b3153af06195d66c1d68fbea5a
+          git fetch --no-tags https://github.com/runelite/runelite.git "$upstream"
+          test "$(git rev-parse FETCH_HEAD)" = "$upstream"
+          git -c user.name='SkyRune CI' -c user.email='skyrune-ci@users.noreply.github.com' merge --no-ff --no-edit "$upstream"
+          git merge-base --is-ancestor "$upstream" HEAD
+          mkdir -p "$RUNNER_TEMP/rev243-source"
+          git show -s --format=fuller HEAD > "$RUNNER_TEMP/rev243-source/merge-commit.txt"
+          git diff --binary HEAD^1 HEAD > "$RUNNER_TEMP/rev243-source/upstream-merge.patch"
+
+      - name: Upload source merge for review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: SkyRune-Rev243-Source-Merge
+          path: ${{ runner.temp }}/rev243-source/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Set up build environment
         run: |
@@ -53,7 +74,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-Map-Text-Input-Test-Results
+          name: SkyRune-Rev243-Test-Results
           path: runelite-client/build/test-results/test/*.xml
           if-no-files-found: warn
           retention-days: 14
@@ -76,7 +97,7 @@ jobs:
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: SkyRune-Map-Text-Input-IPA
+          name: SkyRune-Rev243-IPA
           path: dist/ci/*.ipa
           if-no-files-found: error
           retention-days: 14
